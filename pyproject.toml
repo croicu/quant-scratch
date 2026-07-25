@@ -10,10 +10,11 @@ readme = "README.md"
 requires-python = ">=3.12"
 
 dependencies = [
+    "yfinance>=0.2.28",
 ]
 
 [project.scripts]
-quant-scratch = "quant_scratch.cli:main"
+stock-quote = "stock_quote.cli:main"
 
 [project.optional-dependencies]
 dev = [

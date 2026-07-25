@@ -6,6 +6,40 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This repo is a scratch space for validating the assumptions underlying strategies and models developed in [quant-research](https://github.com/croicu/quant-research) — the public-facing repo where those findings and strategies are presented. It houses a collection of short, focused experiments — each typically built around its own command-line tool under `src/` — oriented around a single theme: understanding the signals and correlations between financial market parameters. Scripts here are exploratory and disposable by design — quick numerical checks, backtests of specific claims, and sanity tests of assumptions — rather than production-quality or long-lived code.
 
+## Conversation Scope & Outcomes
+
+**One conversation per task.** Each conversation covers a single task from brainstorm through implementation.
+Once cc completes the work and you're satisfied, the conversation closes. New tasks = new conversations.
+
+Conversations with Claude follow a structured workflow across chat and code interfaces:
+
+### Brainstorm Phase (Claude Chat)
+- **Scope**: Design the feature, explore tradeoffs, converge on decisions
+- **Who**: Primarily you + Claude Chat (this interface)
+- **Expected outcome**: A populated `tasks/<task-name>.md` file (using the `new_task.md` template)
+  with problem statement + design decisions, ready for implementation
+- **Deliverable**: Markdown task spec to drop in `./tasks/` folder
+- **Conversation status**: Close after delivery, or keep open if immediate feedback is needed
+
+### Implementation Phase (Claude Code)
+- **Scope**: Build the feature per the task spec
+- **Who**: Claude Code (separate interface/tab)
+- **Expected outcome**: Working code following architecture conventions, passing tests, docs updated
+- **Deliverable**: Code pushed/ready to merge
+- **Conversation status**: This chat stays open for iterations — you can request changes, Claude Chat
+  coordinates feedback back to Claude Code
+
+### Iteration Loop (Both)
+- If Claude Code's output needs refinement:
+  - You describe the issue in this chat
+  - Claude Chat clarifies/updates the task spec or provides feedback
+  - Claude Code implements the changes
+  - Repeat until satisfied
+- If no further changes needed: close this conversation after merge
+
+### Key principle
+- **Chat** owns the spec and design; **Code** owns the implementation. Both can stay in sync via this open conversation.
+
 ## Template Sync
 
 - **Source**: [croicu/tpl-py](https://github.com/croicu/tpl-py)
@@ -72,6 +106,7 @@ After any change that affects the public interface, CLI, or file formats, update
 - `CLAUDE.md` — commands, architecture notes
 - `docs/ARCHITECTURE.md` — modules, data flow, contracts
 - `docs/PROTOCOL.md` — CLI signature, file format schemas
+- `.vscode/launch.json` — add a debug configuration for each CLI tool's entry point
 
 ## Commands
 
@@ -79,8 +114,8 @@ After any change that affects the public interface, CLI, or file formats, update
 # Install (editable, with dev deps)
 pip install -e ".[dev]"
 
-# Run
-quant-scratch
+# Run the stock-quote experiment
+stock-quote AAPL
 
 # Lint
 ruff check src/ tests/
@@ -101,7 +136,7 @@ pytest tests/unit/test_foo.py::test_bar   # single test
 
 ## Logging
 
-- **Use `Logger`** (`from quant_scratch.diagnostics import Logger`) — not bare `print()`.
+- **Use `Logger`** (`from shared.diagnostics import Logger`) — not bare `print()`.
 - **All features log success and errors** — no silent success, no swallowed errors.
 - **Message length by severity**:
   - **Success (info)** — short: feature started, feature ended.
@@ -126,3 +161,4 @@ pytest tests/unit/test_foo.py::test_bar   # single test
 ## Pending Tasks
 
 ## Completed Tasks
+https://github.com/croicu/quant-scratch/blob/main/tasks/new_task.md

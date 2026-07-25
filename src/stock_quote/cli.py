@@ -4,23 +4,28 @@ import argparse
 import sys
 from dataclasses import dataclass
 
-from .diagnostics import ConsoleLogSink, Logger
-from .errors import AppError
-from .settings import Settings
+from shared.diagnostics import ConsoleLogSink, Logger
+from shared.errors import AppError
+from shared.settings import Settings
+
+from .fetcher import fetch_quote
+from .output import quote_to_csv
 
 
 @dataclass
 class CliArguments:
+    ticker: str
     debug: bool = False
 
 
 def parse_args(argv: list[str]) -> CliArguments:
     parser = argparse.ArgumentParser(
-        prog="quant-scratch",
-        usage="quant-scratch [--debug]",
-        description="Short experiments for validating assumptions about signals and correlations across financial market parameters.",
+        prog="stock-quote",
+        usage="stock-quote TICKER [--debug]",
+        description="Fetch and print the current quote for a single stock ticker as CSV.",
     )
 
+    parser.add_argument("ticker", help="stock ticker symbol, e.g. AAPL")
     parser.add_argument(
         "--debug",
         action="store_true",
@@ -30,7 +35,7 @@ def parse_args(argv: list[str]) -> CliArguments:
 
     args = parser.parse_args(argv)
 
-    return CliArguments(debug=args.debug)
+    return CliArguments(ticker=args.ticker, debug=args.debug)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -39,7 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         settings = Settings.load()
     except AppError as error:
-        print(f"quant-scratch: error: {error}", file=sys.stderr)
+        print(f"stock-quote: error: {error}", file=sys.stderr)
         return 1
 
     debug = settings.debug or arguments.debug
@@ -52,13 +57,13 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
     try:
-        Logger.info("quant-scratch: started.")
-        Logger.info("quant-scratch: completed.")
+        quote = fetch_quote(arguments.ticker)
+        print(quote_to_csv(quote), end="")
         return 0
     except AppError as error:
         if debug:
             raise
-        print(f"quant-scratch: error: {error}", file=sys.stderr)
+        print(f"stock-quote: error: {error}", file=sys.stderr)
         return 1
     finally:
         Logger.set_logger(None)
