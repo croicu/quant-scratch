@@ -16,9 +16,9 @@ class CliArguments:
 
 def parse_args(argv: list[str]) -> CliArguments:
     parser = argparse.ArgumentParser(
-        prog="__project_name__",
-        usage="__project_name__ [--debug]",
-        description="__description__",
+        prog="quant-scratch",
+        usage="quant-scratch [--debug]",
+        description="Short experiments for validating assumptions about signals and correlations across financial market parameters.",
     )
 
     parser.add_argument(
@@ -39,7 +39,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         settings = Settings.load()
     except AppError as error:
-        print(f"__project_name__: error: {error}", file=sys.stderr)
+        print(f"quant-scratch: error: {error}", file=sys.stderr)
         return 1
 
     debug = settings.debug or arguments.debug
@@ -52,13 +52,13 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
     try:
-        Logger.info("__project_name__: started.")
-        Logger.info("__project_name__: completed.")
+        Logger.info("quant-scratch: started.")
+        Logger.info("quant-scratch: completed.")
         return 0
     except AppError as error:
         if debug:
             raise
-        print(f"__project_name__: error: {error}", file=sys.stderr)
+        print(f"quant-scratch: error: {error}", file=sys.stderr)
         return 1
     finally:
         Logger.set_logger(None)

@@ -1,4 +1,4 @@
-from __package_name__.cli import main
+from quant_scratch.cli import main
 
 
 def test_main_runs_clean(tmp_path, monkeypatch):

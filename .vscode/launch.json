@@ -5,7 +5,7 @@
       "name": "Python: Run (CLI)",
       "type": "debugpy",
       "request": "launch",
-      "module": "__package_name__.cli",
+      "module": "quant_scratch.cli",
       "args": [],
       "console": "integratedTerminal",
       "justMyCode": true

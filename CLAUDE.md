@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Mission
 
-__mission__
+This repo is a scratch space for validating the assumptions underlying strategies and models developed in [quant-research](https://github.com/croicu/quant-research) — the public-facing repo where those findings and strategies are presented. It houses a collection of short, focused experiments — each typically built around its own command-line tool under `src/` — oriented around a single theme: understanding the signals and correlations between financial market parameters. Scripts here are exploratory and disposable by design — quick numerical checks, backtests of specific claims, and sanity tests of assumptions — rather than production-quality or long-lived code.
 
 ## Template Sync
 
 - **Source**: [croicu/tpl-py](https://github.com/croicu/tpl-py)
-- **Synced to**: <!-- SYNCED_TO --> (set by `tasks/repo_setup.md` at instantiation time; left
+- **Synced to**: 2026-07-25T02:12:39Z (set by `tasks/repo_setup.md` at instantiation time; left
   unset in `tpl-py`'s own master copy of this file, since the source has nothing to sync
   against)
 
@@ -80,7 +80,7 @@ After any change that affects the public interface, CLI, or file formats, update
 pip install -e ".[dev]"
 
 # Run
-__project_name__
+quant-scratch
 
 # Lint
 ruff check src/ tests/
@@ -101,7 +101,7 @@ pytest tests/unit/test_foo.py::test_bar   # single test
 
 ## Logging
 
-- **Use `Logger`** (`from __package_name__.diagnostics import Logger`) — not bare `print()`.
+- **Use `Logger`** (`from quant_scratch.diagnostics import Logger`) — not bare `print()`.
 - **All features log success and errors** — no silent success, no swallowed errors.
 - **Message length by severity**:
   - **Success (info)** — short: feature started, feature ended.
@@ -124,8 +124,5 @@ pytest tests/unit/test_foo.py::test_bar   # single test
 ## New Task
 
 ## Pending Tasks
-- **File**: [Repo Setup](tasks/repo_setup.md)
-- **Status**: Implementation
-- **Key Context**: This repo was generated from a template and still contains placeholder tokens. Replace them per that file's instructions, then delete it and this entry.
 
 ## Completed Tasks

@@ -1,14 +1,8 @@
-# __project_name__
+# quant-scratch
 
-__description__
+A collection of short, self-contained experiments — each backed by its own CLI tool — for validating or invalidating assumptions about signals and correlations across financial market parameters. Findings and strategies are presented in [quant-research](https://github.com/croicu/quant-research).
 
 ---
-
-## Setup
-
-This repo was generated from a template and still contains placeholder tokens
-(`__package_name__`, `__project_name__`, `__description__`, `__mission__`). See
-[tasks/repo_setup.md](tasks/repo_setup.md) for replacement instructions.
 
 ## Install
 

@@ -3,9 +3,9 @@ requires = ["setuptools>=80"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "x__project_name__x"  # PEP 508 name must start/end alnum; see tasks/repo_setup.md
+name = "quant-scratch"
 version = "0.1.0"
-description = "__description__"
+description = "A collection of short, self-contained experiments — each backed by its own CLI tool — for validating or invalidating assumptions about signals and correlations across financial market parameters. Findings and strategies are presented in quant-research (https://github.com/croicu/quant-research)."
 readme = "README.md"
 requires-python = ">=3.12"
 
@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.scripts]
-__project_name__ = "__package_name__.cli:main"
+quant-scratch = "quant_scratch.cli:main"
 
 [project.optional-dependencies]
 dev = [
