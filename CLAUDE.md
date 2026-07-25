@@ -163,6 +163,7 @@ pytest tests/unit/test_foo.py::test_bar   # single test
 
 ## Completed Tasks
 - **Stock Quote CLI Tool** — [issue #1](https://github.com/croicu/quant-scratch/issues/1)
+- **Yahoo provider componentization** — [issue #2](https://github.com/croicu/quant-scratch/issues/2)
 
 ## Task Template
 https://github.com/croicu/quant-scratch/blob/main/tasks/new_task.md
