@@ -131,8 +131,9 @@ pytest tests/unit/test_foo.py::test_bar   # single test
 1. Internal processing uses strongly typed dataclasses.
 2. `protocols.py` contains persisted/shared data contracts — pure data only, no behavior. Behavior that operates on protocol types belongs in a dedicated entity/service layer, not on the protocol classes themselves.
 3. `contracts.py` contains runtime behavioral interfaces (`Protocol` classes for things like workers/executors), not data.
-4. Tests must run offline.
-5. Prefer explicit, readable Python over clever abstractions.
+4. `protocols.py`/`contracts.py` live in the repo-wide `defs` package (`src/defs/`), not inside any single implementation package — they're the specification, not owned by whichever package happens to implement them (e.g. `shared`).
+5. Unit tests (`tests/unit/`) must run offline. Integration tests (`tests/integration/`) may hit real external services — deliberately not offline, since fully DI'ing the transport layer for a small component wasn't judged worth the engineering cost. `pytest.ini`'s `testpaths = tests` covers both, so integration tests run as part of the default `pytest` invocation.
+6. Prefer explicit, readable Python over clever abstractions.
 
 ## Logging
 

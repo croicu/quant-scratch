@@ -11,7 +11,25 @@
       "justMyCode": true
     },
     {
-      "name": "Python: Run PyTest",
+      "name": "Python: Run Unit Tests",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["-v", "-s", "-x", "tests/unit"],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      "name": "Python: Run Integration Tests",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["-v", "-s", "-x", "tests/integration"],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      "name": "Python: Run All Tests",
       "type": "debugpy",
       "request": "launch",
       "module": "pytest",

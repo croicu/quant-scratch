@@ -3,12 +3,14 @@ from __future__ import annotations
 import argparse
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
+from defs.contracts import YahooFinanceProvider
 from shared.diagnostics import ConsoleLogSink, Logger
 from shared.errors import AppError
 from shared.settings import Settings
+from shared.yahoo_finance import YahooFinance
 
-from .fetcher import fetch_quote
 from .output import quote_to_csv
 
 
@@ -38,11 +40,16 @@ def parse_args(argv: list[str]) -> CliArguments:
     return CliArguments(ticker=args.ticker, debug=args.debug)
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    provider: YahooFinanceProvider | None = None,
+    settings_path: Path | None = None,
+) -> int:
     arguments = parse_args(sys.argv[1:] if argv is None else argv)
+    active_provider = YahooFinance() if provider is None else provider
 
     try:
-        settings = Settings.load()
+        settings = Settings.load() if settings_path is None else Settings.load(path=settings_path)
     except AppError as error:
         print(f"stock-quote: error: {error}", file=sys.stderr)
         return 1
@@ -57,7 +64,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
     try:
-        quote = fetch_quote(arguments.ticker)
+        quote = active_provider.fetch_quote(arguments.ticker)
         print(quote_to_csv(quote), end="")
         return 0
     except AppError as error:

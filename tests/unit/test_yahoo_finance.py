@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
+from defs.protocols import StockQuote
+from shared import yahoo_finance
 from shared.errors import AppError
-from stock_quote import fetcher
-from stock_quote.protocols import StockQuote
 
 
 class FakeTicker:
@@ -18,9 +18,9 @@ def test_fetch_quote_returns_stock_quote(monkeypatch):
     def fake_ticker(ticker: str) -> FakeTicker:
         return FakeTicker(fake_info)
 
-    monkeypatch.setattr(fetcher.yfinance, "Ticker", fake_ticker)
+    monkeypatch.setattr(yahoo_finance.yfinance, "Ticker", fake_ticker)
 
-    quote = fetcher.fetch_quote("aapl")
+    quote = yahoo_finance.YahooFinance().fetch_quote("aapl")
 
     assert isinstance(quote, StockQuote)
     assert quote.ticker == "AAPL"
@@ -35,17 +35,17 @@ def test_fetch_quote_raises_on_missing_data(monkeypatch):
     def fake_ticker(ticker: str) -> FakeTicker:
         return FakeTicker(fake_info)
 
-    monkeypatch.setattr(fetcher.yfinance, "Ticker", fake_ticker)
+    monkeypatch.setattr(yahoo_finance.yfinance, "Ticker", fake_ticker)
 
     with pytest.raises(AppError):
-        fetcher.fetch_quote("BADTICKER")
+        yahoo_finance.YahooFinance().fetch_quote("BADTICKER")
 
 
 def test_fetch_quote_raises_on_network_error(monkeypatch):
     def fake_ticker(ticker: str) -> FakeTicker:
         raise RuntimeError("network down")
 
-    monkeypatch.setattr(fetcher.yfinance, "Ticker", fake_ticker)
+    monkeypatch.setattr(yahoo_finance.yfinance, "Ticker", fake_ticker)
 
     with pytest.raises(AppError):
-        fetcher.fetch_quote("AAPL")
+        yahoo_finance.YahooFinance().fetch_quote("AAPL")

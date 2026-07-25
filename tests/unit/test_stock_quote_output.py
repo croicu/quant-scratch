@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from defs.protocols import StockQuote
 from stock_quote.output import quote_to_csv
-from stock_quote.protocols import StockQuote
 
 
 def test_quote_to_csv_formats_header_and_row():

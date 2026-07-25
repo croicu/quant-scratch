@@ -30,3 +30,17 @@ One header row followed by one data row:
 | `price` | float | Last traded price |
 | `timestamp` | string | ISO 8601 UTC timestamp of the fetch |
 | `volume` | int | Last traded volume |
+
+### Mock Yahoo Finance fixture (`tests/data/yahoo_finance_quotes.json`)
+
+Read by `tests.mocks.yahoo_finance.MockYahooFinance` (test-only). A JSON object keyed by uppercased
+ticker symbol:
+
+```json
+{
+  "AAPL": { "price": 150.25, "volume": 1000000 }
+}
+```
+
+`timestamp` isn't stored in the fixture — the mock generates it at fetch time, same as the real
+`YahooFinance` implementation.

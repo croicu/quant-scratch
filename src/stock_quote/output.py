@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import io
 
-from .protocols import StockQuote
+from defs.protocols import StockQuote
 
 CSV_HEADERS = ["ticker", "price", "timestamp", "volume"]
 

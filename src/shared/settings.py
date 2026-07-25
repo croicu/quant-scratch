@@ -22,7 +22,7 @@ class Settings:
     _instance: ClassVar[Settings | None] = None
 
     @classmethod
-    def load(cls) -> Settings:
+    def load(cls, path: Path = _SETTINGS_PATH, local_path: Path = _LOCAL_PATH) -> Settings:
         debug = False
         log_level = TelemetryLevel.ERROR
         log_categories: list[str] = []
@@ -30,8 +30,8 @@ class Settings:
 
         settings_payload: dict = {}
 
-        if _SETTINGS_PATH.exists():
-            with _SETTINGS_PATH.open("r", encoding="utf-8") as f:
+        if path.exists():
+            with path.open("r", encoding="utf-8") as f:
                 settings_file = json.load(f)
             if not isinstance(settings_file, dict):
                 raise TaskError("settings.json must contain a JSON object.")
@@ -40,8 +40,8 @@ class Settings:
                 raise TaskError("'settings' in settings.json must be a JSON object.")
             settings_payload = dict(base_settings)
 
-        if _LOCAL_PATH.exists():
-            with _LOCAL_PATH.open("r", encoding="utf-8") as f:
+        if local_path.exists():
+            with local_path.open("r", encoding="utf-8") as f:
                 local_payload = json.load(f)
             if isinstance(local_payload, dict):
                 local_settings = local_payload.get("settings", {})
