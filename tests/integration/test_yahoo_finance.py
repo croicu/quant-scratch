@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from defs.protocols import StockQuote
-from shared.yahoo_finance import YahooFinance
+from shared.providers.yahoo_finance import YahooFinance
 
 
 def test_fetch_quote_returns_live_data_for_known_ticker():

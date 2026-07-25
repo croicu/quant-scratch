@@ -8,8 +8,8 @@ from pathlib import Path
 from defs.contracts import YahooFinanceProvider
 from shared.diagnostics import ConsoleLogSink, Logger
 from shared.errors import AppError
+from shared.providers.yahoo_finance import YahooFinance
 from shared.settings import Settings
-from shared.yahoo_finance import YahooFinance
 
 from .output import quote_to_csv
 

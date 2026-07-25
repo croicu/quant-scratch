@@ -160,8 +160,8 @@ pytest tests/unit/test_foo.py::test_bar   # single test
 ## New Task
 
 ## Pending Tasks
-- **Databento intraday volume provider** — [tasks/databento_intraday_volume.md](tasks/databento_intraday_volume.md) (brainstorm; blocked on manual Databento signup/API key)
-- **Local chunked data cache (FirstRateData)** — [tasks/local_data_cache_firstratedata.md](tasks/local_data_cache_firstratedata.md) (brainstorm; broader local-cache strategy, overlaps with the Databento task on the SPY/QQQ extended-hours volume gap — see that file's open questions)
+- **Local chunked data cache (FirstRateData)** — [tasks/local_data_cache_firstratedata.md](tasks/local_data_cache_firstratedata.md) (brainstorm; primary path for SPY/QQQ extended-hours volume; blocked on user downloading a FirstRateData sample to confirm the CSV schema)
+- **Databento intraday volume provider** — [tasks/databento_intraday_volume.md](tasks/databento_intraday_volume.md) (brainstorm; deprioritized backup — usage-based billing risk vs. FirstRateData's one-time-purchase model)
 
 ## Completed Tasks
 - **Stock Quote CLI Tool** — [issue #1](https://github.com/croicu/quant-scratch/issues/1)

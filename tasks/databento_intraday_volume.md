@@ -1,6 +1,12 @@
 # Databento Intraday Volume Provider
 
-## Status: Brainstorm
+## Status: Brainstorm (deprioritized — backup only)
+
+Deprioritized in favor of [[local_data_cache_firstratedata]]: Databento's usage-based billing
+model is a concern — free credit today, but a real risk of being charged automatically once it
+runs out if usage isn't tracked carefully. FirstRateData's one-time-purchase-per-chunk model
+avoids that recurring-billing surprise entirely. Only revisit this task if FirstRateData's data
+quality or cost doesn't work out.
 
 ## Problem statement
 

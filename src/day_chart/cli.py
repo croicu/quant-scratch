@@ -9,8 +9,8 @@ from pathlib import Path
 from defs.contracts import IntraDayProvider
 from shared.diagnostics import ConsoleLogSink, Logger
 from shared.errors import AppError
+from shared.providers.yahoo_finance import YahooFinanceIntraDay
 from shared.settings import Settings
-from shared.yahoo_finance import YahooFinanceIntraDay
 
 from .chart import render_chart
 from .output import bars_to_csv

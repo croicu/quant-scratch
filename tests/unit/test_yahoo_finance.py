@@ -3,8 +3,8 @@ from __future__ import annotations
 import pytest
 
 from defs.protocols import StockQuote
-from shared import yahoo_finance
 from shared.errors import AppError
+from shared.providers import yahoo_finance
 
 
 class FakeTicker:

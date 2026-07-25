@@ -6,8 +6,8 @@ import pandas as pd
 import pytest
 
 from defs.protocols import DayBar
-from shared import yahoo_finance
 from shared.errors import AppError
+from shared.providers import yahoo_finance
 
 
 class FakeTickerWithHistory:

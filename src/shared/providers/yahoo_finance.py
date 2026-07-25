@@ -6,9 +6,9 @@ import yfinance
 
 from defs.protocols import DayBar, StockQuote
 
-from .diagnostics import Logger
-from .errors import AppError
-from .sessions import infer_session
+from ..diagnostics import Logger
+from ..errors import AppError
+from ..sessions import infer_session
 
 CATEGORY_QUOTE_FETCH = "quote_fetch"
 CATEGORY_INTRADAY_FETCH = "intraday_fetch"

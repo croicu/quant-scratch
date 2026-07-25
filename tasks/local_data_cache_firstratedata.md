@@ -33,27 +33,29 @@ Per the originating brainstorm note (folded into this file):
   `YahooFinanceIntraDay`/a future `DatabentoIntraDay`) reads `/data/{TICKER}/{TICKER}_{YYYY-MM}.csv`
   for the requested ticker/date, parses rows into `DayBar`, and raises `AppError` with a clear
   "download this chunk" message if the file doesn't exist.
+- **Provider selection — resolved**: a fully separate, explicitly-selected provider, not a
+  cache-first fallback in front of `YahooFinanceIntraDay`. A missing chunk raises a clear
+  `AppError` telling the user which file to download, rather than silently falling back to a live
+  fetch. Keeps the two providers' behavior predictable and easy to reason about independently.
 - **Future scaling**: if the local folder needs to be shared or archived, upload to a Cloudflare
   R2 bucket (10GB free tier) and repoint `LocalCSVIntraDay` at an R2 URL instead of disk — no
   changes needed to `day-chart` itself, since it only depends on the `IntraDayProvider` protocol.
 
 ## Open questions
 
-- **Exact FirstRateData CSV schema** is unverified — column names/timestamp format/timezone need
-  confirming against a real downloaded sample before the parser can be written; the note's schema
-  table is a guess pending that.
+- **Blocking prerequisite**: exact FirstRateData CSV schema is unverified — column names,
+  timestamp format, and timezone all need confirming against a real downloaded sample before the
+  parser can be written; the note's schema table is a guess pending that. Next step is on the
+  user: download the free 1-2 week SPY sample from firstratedata.com and drop it somewhere
+  readable (this file's Brainstorm status won't advance to Implementation until that happens).
 - **Cost**: only a "2-week free sample" is mentioned before presumably-paid downloads — confirm
   what FirstRateData actually costs for the month/ticker range needed before committing to this
   as the long-term source.
-- **Provider selection**: same open question as the Databento task — does `day-chart` gain an
-  explicit way to choose between providers (CLI flag, settings toggle), does `LocalCSVIntraDay`
-  become a transparent cache-first layer in front of `YahooFinanceIntraDay` (fetch live, save
-  locally, reuse next time), or is it a fully separate opt-in provider the user wires in
-  explicitly? This wasn't resolved in the originating note, which describes "falls back to other
-  providers if local file missing" — implying a composite/fallback provider, not a simple swap.
 - **Relationship to [[databento_intraday_volume]]**: both tasks solve the same underlying
-  SPY/QQQ extended-hours volume problem. Revisit whether both are still needed once either is
-  explored further, to avoid maintaining two parallel data sources for the same gap.
+  SPY/QQQ extended-hours volume problem. Databento is being kept as a deprioritized backup (its
+  usage-based billing model was a concern — risk of being charged once the free credit runs out,
+  vs. FirstRateData's one-time-purchase-per-chunk model with no recurring billing surprise).
+  Revisit only if FirstRateData's data or cost doesn't pan out.
 - Module location/name for the new provider (`src/shared/local_csv_finance.py` was the note's
   suggestion) — confirm against repo conventions once this reaches Implementation.
 

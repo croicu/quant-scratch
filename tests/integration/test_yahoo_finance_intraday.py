@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 
 from defs.protocols import DayBar
-from shared.yahoo_finance import YahooFinanceIntraDay
+from shared.providers.yahoo_finance import YahooFinanceIntraDay
 
 
 def _last_weekday(reference: date) -> date:

@@ -23,3 +23,6 @@ __pycache__/
 
 # Local settings override (personal overrides, not committed)
 settings.local.json
+
+# Local data cache (see tasks/local_data_cache_firstratedata.md)
+/data/
