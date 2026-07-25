@@ -11,6 +11,15 @@
       "justMyCode": true
     },
     {
+      "name": "Python: Run day-chart (CLI)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "day_chart.cli",
+      "args": ["${input:ticker}"],
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
       "name": "Python: Run Unit Tests",
       "type": "debugpy",
       "request": "launch",

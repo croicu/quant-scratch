@@ -11,10 +11,12 @@ requires-python = ">=3.12"
 
 dependencies = [
     "yfinance>=0.2.28",
+    "matplotlib>=3.9",
 ]
 
 [project.scripts]
 stock-quote = "stock_quote.cli:main"
+day-chart = "day_chart.cli:main"
 
 [project.optional-dependencies]
 dev = [
