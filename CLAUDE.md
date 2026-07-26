@@ -69,6 +69,33 @@ protocol below applies depends on which repo you're in.
    should do about it.
 2. Append a row to `ADDENDUM.md`'s table (timestamp, title, filename).
 
+## Cross-Repo Coordination
+
+This repo has a real data-contract relationship with
+[croicu/quant-data](https://github.com/croicu/quant-data) (the market-data warehouse — schema,
+migrations, and eventually ingest/read tooling): quant-data is the producer, quant-scratch (and any
+future consumer repos) is the client. Coordination happens via GitHub issues, not a changelog file
+— unlike the template-propagation model in "Template Sync" above, which suits a one-to-many static
+template but not an active two-way contract between two independently-evolving repos.
+
+**Placement rule**: a cross-repo issue lives in whichever repo owns the actionable follow-up, not
+necessarily where the need originated:
+- **quant-data ships a breaking or notable change** (schema migration, changed contract, a
+  deprecated column) → open an issue in **quant-scratch** (and any other consumer repo) announcing
+  it, since that's where the reacting work happens.
+- **quant-scratch needs something from quant-data** (new ticker/column support, a schema change, a
+  bug in returned data) → open an issue in **quant-data** requesting it, since that's where the
+  building work happens.
+
+**Conventions**:
+- Label every cross-repo issue `cross-repo` (alongside the normal `status:*` label) so these
+  threads are filterable apart from each repo's own internal work.
+- Always cross-link: the issue body must reference the originating repo/issue/commit (e.g. "See
+  croicu/quant-data#12" or "Needed for croicu/quant-scratch's day-chart work"), so either side is
+  navigable from the other.
+- Use `gh issue create --repo <owner>/<repo>` to open a cross-repo issue directly from wherever
+  you're working — no need to switch working directories first.
+
 ## Collaboration rules
 
 - Before implementing any feature or non-trivial change, ask clarifying questions until the intent is unambiguous.
