@@ -96,6 +96,10 @@ necessarily where the need originated:
 - Use `gh issue create --repo <owner>/<repo>` to open a cross-repo issue directly from wherever
   you're working — no need to switch working directories first.
 
+**Future: multiple consumers.** Not built yet — quant-scratch is the only consumer so far. See
+quant-data's `CLAUDE.md` for the planned design (a consumer registry, fan-out issues, and a
+rollout-tracking issue) once a second consumer repo actually exists.
+
 ## Collaboration rules
 
 - Before implementing any feature or non-trivial change, ask clarifying questions until the intent is unambiguous.
