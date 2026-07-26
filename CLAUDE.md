@@ -168,6 +168,13 @@ pytest tests/unit/test_foo.py::test_bar   # single test
 - **Stock Quote CLI Tool** — [issue #1](https://github.com/croicu/quant-scratch/issues/1)
 - **Yahoo provider componentization** — [issue #2](https://github.com/croicu/quant-scratch/issues/2)
 - **Day trading chart CLI tool** — [issue #4](https://github.com/croicu/quant-scratch/issues/4)
+- **Bootstrap `quant-data` warehouse repo** — schema, migrations, and docs seeded into a new
+  standalone repo, [croicu/quant-data](https://github.com/croicu/quant-data) (cloned locally as
+  `./quant-data/`, gitignored here — not part of this repo's history). Originated from this repo's
+  `tasks/bootstrap_quant_data.md` and `tasks/database_layer.md` (both retired, content now lives in
+  `quant-data`). No code change in `quant-scratch` itself yet — it will eventually depend on
+  `quant-data` for market data instead of each experiment fetching/storing its own, once
+  `quant-data`'s own `tasks/postgres_client_and_dimensions.md` follow-up ships a read client.
 
 ## Task Template
 https://github.com/croicu/quant-scratch/blob/main/tasks/new_task.md

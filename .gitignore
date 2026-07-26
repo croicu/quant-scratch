@@ -26,3 +26,6 @@ settings.local.json
 
 # Local data cache (see tasks/local_data_cache_firstratedata.md)
 /data/
+
+# quant-data: separate GitHub repo cloned as a subdirectory, not part of this repo's history
+/quant-data/
