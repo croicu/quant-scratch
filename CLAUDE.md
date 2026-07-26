@@ -160,8 +160,9 @@ pytest tests/unit/test_foo.py::test_bar   # single test
 ## New Task
 
 ## Pending Tasks
-- **Local chunked data cache (FirstRateData)** — [tasks/local_data_cache_firstratedata.md](tasks/local_data_cache_firstratedata.md) (brainstorm; primary path for SPY/QQQ extended-hours volume; blocked on user downloading a FirstRateData sample to confirm the CSV schema)
-- **Databento intraday volume provider** — [tasks/databento_intraday_volume.md](tasks/databento_intraday_volume.md) (brainstorm; deprioritized backup — usage-based billing risk vs. FirstRateData's one-time-purchase model)
+- **IBKR TWS API extended-hours provider** — [tasks/ibkr_tws_extended_hours.md](tasks/ibkr_tws_extended_hours.md) (brainstorm; chosen path for SPY/QQQ extended-hours volume; blocked on IBKR account approval, 1-3 business days from 2026-07-25)
+- **Databento intraday volume provider** — [tasks/databento_intraday_volume.md](tasks/databento_intraday_volume.md) / [issue #5](https://github.com/croicu/quant-scratch/issues/5) (postponed 2026-07-25 in favor of IBKR)
+- **Local chunked data cache (FirstRateData)** — [tasks/local_data_cache_firstratedata.md](tasks/local_data_cache_firstratedata.md) / [issue #6](https://github.com/croicu/quant-scratch/issues/6) (postponed 2026-07-25 in favor of IBKR)
 
 ## Completed Tasks
 - **Stock Quote CLI Tool** — [issue #1](https://github.com/croicu/quant-scratch/issues/1)

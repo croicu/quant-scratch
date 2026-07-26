@@ -1,6 +1,26 @@
 # Local Chunked Historical Data Cache (FirstRateData)
 
-## Status: Brainstorm
+## Status: Postponed
+
+Postponed 2026-07-25 — FirstRateData specifically isn't being pursued further; the chosen path
+forward is [[ibkr_tws_extended_hours]] (IBKR TWS API). Kept rather than deleted since the
+underlying local-cache design (chunking, folder layout, `IntraDayProvider`-shaped
+`LocalCSVIntraDay`) is source-agnostic and may still apply later, e.g. as a local cache in front of
+whatever provider ends up in use.
+
+Two structural decisions from a 2026-07-25 brainstorm, to carry forward whenever this (or a
+similar) local-cache task is picked back up, regardless of which source ends up feeding it:
+- **Folder structure — namespace by source**: `/data/<source>/<TICKER>/<TICKER>_<YYYY-MM>.csv`
+  (e.g. `/data/firstratedata/SPY/SPY_2024-01.csv`), not a flat `/data/<TICKER>/...` — so a second
+  source added later (Databento or otherwise) can't collide with or be confused for this one.
+- **Download tracking stays uncommitted**: since `/data/` is now fully gitignored (not just
+  `*.csv`, per the same 2026-07-25 change), a `README.md`/manifest tracking what's been downloaded
+  lives inside `/data/` too, uncommitted — it's local bookkeeping, not something that needs git
+  history or cross-machine sharing.
+
+---
+
+*Everything below is the original brainstorm content, kept as historical record.*
 
 ## Problem statement
 

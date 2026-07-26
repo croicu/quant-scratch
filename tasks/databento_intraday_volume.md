@@ -1,12 +1,12 @@
 # Databento Intraday Volume Provider
 
-## Status: Brainstorm (deprioritized — backup only)
+## Status: Postponed
 
-Deprioritized in favor of [[local_data_cache_firstratedata]]: Databento's usage-based billing
-model is a concern — free credit today, but a real risk of being charged automatically once it
-runs out if usage isn't tracked carefully. FirstRateData's one-time-purchase-per-chunk model
-avoids that recurring-billing surprise entirely. Only revisit this task if FirstRateData's data
-quality or cost doesn't work out.
+Postponed 2026-07-25 — Databento's usage-based billing model was a concern (free credit today,
+but a real risk of being charged automatically once it runs out if usage isn't tracked carefully).
+[[local_data_cache_firstratedata]] was briefly considered instead, then also postponed; the chosen
+path forward is [[ibkr_tws_extended_hours]] (IBKR TWS API — free with any account, no recurring
+per-usage billing). Revisit only if IBKR doesn't pan out (account/data-entitlement issues, etc.).
 
 ## Problem statement
 
