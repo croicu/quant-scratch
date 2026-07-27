@@ -13,11 +13,21 @@ _LOCAL_PATH = Path("./settings.local.json")
 
 
 @dataclass
+class PostgresSettings:
+    host: str
+    port: int
+    user: str
+    password: str
+    dbname: str
+
+
+@dataclass
 class Settings:
     debug: bool
     logging: TelemetryLevel = TelemetryLevel.ERROR
     log_categories: list[str] = field(default_factory=list)
     excluded_categories: list[str] = field(default_factory=list)
+    postgres: PostgresSettings | None = None
 
     _instance: ClassVar[Settings | None] = None
 
@@ -83,11 +93,32 @@ class Settings:
             # debug=true shows everything, same as an empty filter always has.
             log_categories = [] if debug else [CATEGORY_GENERAL]
 
+        postgres_settings: PostgresSettings | None = None
+        postgres_payload = settings_payload.get("postgres")
+        if postgres_payload is not None:
+            if not isinstance(postgres_payload, dict):
+                raise TaskError("'settings.postgres' must be a JSON object.")
+            required_keys = ["host", "port", "user", "password", "dbname"]
+            missing_keys = []
+            for key in required_keys:
+                if key not in postgres_payload:
+                    missing_keys.append(key)
+            if missing_keys:
+                raise TaskError(f"'settings.postgres' is missing required key(s): {', '.join(missing_keys)}")
+            postgres_settings = PostgresSettings(
+                host=str(postgres_payload["host"]),
+                port=int(postgres_payload["port"]),
+                user=str(postgres_payload["user"]),
+                password=str(postgres_payload["password"]),
+                dbname=str(postgres_payload["dbname"]),
+            )
+
         cls._instance = cls(
             debug=debug,
             logging=log_level,
             log_categories=log_categories,
             excluded_categories=excluded_categories,
+            postgres=postgres_settings,
         )
 
         return cls._instance

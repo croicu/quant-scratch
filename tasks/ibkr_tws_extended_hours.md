@@ -8,6 +8,15 @@ Account opened 2026-07-25; approval expected within 1-3 business days. This file
 status won't advance to Implementation until the account is approved and TWS/IBGateway access is
 confirmed working — that's a manual prerequisite, not something Claude Code can do.
 
+**Target shifted 2026-07-26**: `day-chart` no longer fetches intraday data live at all — it reads
+from the [quant-data](https://github.com/croicu/quant-data) warehouse via `QuantDataIntraDay`
+(quant-scratch#7). quant-data's own `quant-ingest` still pulls from Yahoo Finance and inherits its
+extended-hours volume gap (flagged via `OHLCV.incomplete`, not fixed). So whenever this task is
+picked back up, an IBKR-based provider would need to be implemented as a new *ingest*-side source
+inside `quant-data` (alongside/replacing its `shared/providers/yf.py`), not as a `quant-scratch`
+CLI provider as originally scoped below — the design below (session inference reuse, connect-per-
+call lifecycle, etc.) still broadly applies, just in a different repo.
+
 ## Problem statement
 
 Same underlying problem as the postponed tasks: `YahooFinanceIntraDay` returns essentially zero

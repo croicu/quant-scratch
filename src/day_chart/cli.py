@@ -9,7 +9,7 @@ from pathlib import Path
 from defs.contracts import IntraDayProvider
 from shared.diagnostics import ConsoleLogSink, Logger
 from shared.errors import AppError
-from shared.providers.yahoo_finance import YahooFinanceIntraDay
+from shared.providers.quant_data import QuantDataIntraDay
 from shared.settings import Settings
 
 from .chart import render_chart
@@ -82,11 +82,23 @@ def main(
     output_dir: Path | None = None,
 ) -> int:
     arguments = parse_args(sys.argv[1:] if argv is None else argv)
-    active_provider = YahooFinanceIntraDay() if provider is None else provider
     active_output_dir = Path(".") if output_dir is None else output_dir
 
     try:
         settings = Settings.load() if settings_path is None else Settings.load(path=settings_path)
+
+        if provider is not None:
+            active_provider = provider
+        else:
+            if settings.postgres is None:
+                raise AppError("day-chart requires a 'postgres' section in settings.json to reach quant-data.")
+            active_provider = QuantDataIntraDay(
+                host=settings.postgres.host,
+                port=settings.postgres.port,
+                dbname=settings.postgres.dbname,
+                user=settings.postgres.user,
+                password=settings.postgres.password,
+            )
     except AppError as error:
         print(f"day-chart: error: {error}", file=sys.stderr)
         return 1

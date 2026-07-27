@@ -15,11 +15,15 @@ future cross-cutting non-implementation declarations (constants, etc.) — hence
 rather than something provider-specific.
 
 - `protocols.py` — pure data: `StockQuote` (`ticker`, `price`, `timestamp`, `volume`);
-  `DayBar` (`timestamp: datetime` UTC-aware, `open`, `high`, `low`, `close`, `volume`, `session: str`).
-  `DayBar.timestamp` is a `datetime` rather than a `str` like `StockQuote.timestamp` — an
-  intentional divergence, since bar data needs real datetime arithmetic (session inference,
-  sorting, ET conversion for the chart x-axis) that a string would just force back into a parsed
-  datetime anyway.
+  `DayBar` (`timestamp: datetime` UTC-aware, `open`, `high`, `low`, `close`, `volume`, `session: str`,
+  `incomplete: bool` defaulting `False`). `DayBar.timestamp` is a `datetime` rather than a `str`
+  like `StockQuote.timestamp` — an intentional divergence, since bar data needs real datetime
+  arithmetic (session inference, sorting, ET conversion for the chart x-axis) that a string would
+  just force back into a parsed datetime anyway. `incomplete` mirrors
+  [quant-data](https://github.com/croicu/quant-data)'s `OHLCV.incomplete` field one-for-one — set
+  when the warehouse's provider couldn't supply full data for that bar (in practice, almost every
+  pre/after-market bar, since quant-data's own ingest still pulls from Yahoo Finance and inherits
+  its zero-volume gap outside regular hours).
 - `contracts.py` — behavioral interfaces: `YahooFinanceProvider(Protocol)` — `fetch_quote(ticker) -> StockQuote`;
   `IntraDayProvider(Protocol)` — `fetch_bars(ticker, target_date) -> list[DayBar]`
 
@@ -31,28 +35,54 @@ and has no CLI/console script of its own.
 - `diagnostics.py` — `Logger`, log sinks (`ConsoleLogSink`), telemetry levels/records
 - `settings.py` — `Settings.load(path, local_path)` / `Settings.current()`, reads `settings.json` +
   `settings.local.json` by default; both paths are DI'd parameters (default `./settings.json` /
-  `./settings.local.json`) rather than hardcoded, so callers/tests can point at a fixture instead
+  `./settings.local.json`) rather than hardcoded, so callers/tests can point at a fixture instead.
+  Also `PostgresSettings` (`host`, `port`, `user`, `password`, `dbname`) and a `Settings.postgres`
+  field, parsed from a `postgres` object under `settings.json`/`settings.local.json`'s `settings`
+  key — mirrors quant-data's own `PostgresSettings` shape exactly. None of these values are secret
+  for a client connecting through an already-authenticated local SSH tunnel (`host`/`port` are just
+  the local tunnel endpoint, e.g. `localhost`/`5433`; the `quant_reader` role has no password), so
+  the whole section can live in the committed `settings.json`, not `settings.local.json` — see
+  quant-data's `docs/DATABASE.md` for what actually needs to stay private (the box's real
+  hostname/SSH credentials, which never appear in either repo's committed files).
 - `errors.py` — `AppError`, `TaskError`, `telemetry_session()`
 - `sessions.py` — `infer_session(timestamp_utc) -> str`, classifying a UTC timestamp into
   `"pre-market"` (4:00–9:30 ET), `"regular"` (9:30–16:00 ET), or `"after-market"` (16:00–20:00 ET);
   raises `AppError` for a timestamp outside that range. Lives directly in `shared` (not in
   `day_chart`, despite being introduced for that experiment, and not in `shared/providers/` since
   it isn't itself a provider) because it's needed to construct `DayBar` instances inside
-  `shared.providers.yahoo_finance.YahooFinanceIntraDay` and inside the test mock — putting it in
+  `shared.providers.quant_data.QuantDataIntraDay` and inside the test mock — putting it in
   `day_chart` would have made `shared` depend on an experiment package, inverting the intended
   dependency direction.
 - `providers/` — one module per external data source, each providing a default implementation of
-  a `defs.contracts` interface. Separated from the rest of `shared` so multiple providers (Yahoo
-  today; a future local-CSV or Databento provider) can sit side by side without crowding a single
-  flat file list.
+  a `defs.contracts` interface. Separated from the rest of `shared` so multiple providers can sit
+  side by side without crowding a single flat file list.
   - `yahoo_finance.py` — `YahooFinance`, the default implementation of
     `defs.contracts.YahooFinanceProvider`; wraps `yfinance`, raises `AppError` on an invalid
-    ticker or network failure. Also `YahooFinanceIntraDay`, the default implementation of
-    `defs.contracts.IntraDayProvider`; wraps `yfinance.Ticker(...).history(interval="1m",
-    prepost=True)` for a single day, tags each bar's session via `sessions.infer_session`, and
-    raises `AppError` on an invalid ticker, network failure, or no bars returned (covers both an
-    out-of-range date and a genuine data gap — no separate pre-check for yfinance's ~30-day
-    1-minute lookback limit).
+    ticker or network failure. Used only by `stock_quote` (a live single-quote lookup) — quant-data
+    has no equivalent concept, only historical bars, so this one wasn't replaced.
+  - `quant_data.py` — `QuantDataIntraDay`, the default implementation of
+    `defs.contracts.IntraDayProvider`. Thin wrapper around
+    [quant-data](https://github.com/croicu/quant-data)'s `quant_data.client.market_data.MarketData`
+    read client: calls `fetch_bars(ticker, target_date, target_date)` (a single-day range) and
+    converts each returned `quant_data.defs.protocols.OHLCV` into this repo's own `DayBar`,
+    computing `session` via `sessions.infer_session` and carrying `incomplete` straight through.
+    Normalizes `OHLCV.timestamp` to UTC-aware before use — it's been observed coming back naive
+    despite being documented UTC-aware, which `.astimezone()` (used by both `infer_session` and
+    the chart's ET conversion) would otherwise silently misinterpret using the local machine's
+    system timezone (see [quant-data#8](https://github.com/croicu/quant-data/issues/8)). Bars
+    `infer_session` can't classify (outside the 4:00-20:00 ET window quant-data's warehouse isn't
+    guaranteed to respect — see [quant-data#9](https://github.com/croicu/quant-data/issues/9)) are
+    skipped with a logged warning rather than failing the whole fetch, since day-chart's purpose is
+    session analysis and a warehouse consumer shouldn't hard-fail over a few stray rows; an
+    `AppError` is still raised if *every* returned bar is unclassifiable. Connects using
+    `Settings.postgres` (host/port/user/password/dbname); raises `AppError` if that section is
+    missing, if the connection fails, or if no bars are returned at all. Replaced
+    `shared.providers.yahoo_finance.YahooFinanceIntraDay` (removed — see
+    [croicu/quant-scratch#7](https://github.com/croicu/quant-scratch/issues/7)): quant-data's own
+    ingest already pulls from Yahoo Finance and stores the result, so `day-chart` fetching Yahoo
+    directly was pure duplication once the warehouse existed. Constructor accepts an injected
+    `client` for tests, matching this repo's DI-over-monkeypatching convention for testing
+    dependencies on third-party/cross-repo code.
 
 ### `stock_quote` — first experiment CLI
 
@@ -72,23 +102,27 @@ directly — that's confined to `shared/providers/yahoo_finance.py`.
 
 Fetches full-day intraday bars for a single stock ticker and generates a price/volume chart plus a
 CSV export. Depends on `defs` for the `IntraDayProvider` interface and `DayBar` data type, and on
-`shared` for the default `YahooFinanceIntraDay` implementation plus `Settings`/`Logger`/`AppError`.
-No dependency on `yfinance` or `matplotlib.pyplot` outside its own `chart.py` — bar fetching is
-confined to `shared/providers/yahoo_finance.py`.
+`shared` for the default `QuantDataIntraDay` implementation plus `Settings`/`Logger`/`AppError`. No
+dependency on `quant_data` or `matplotlib.pyplot` outside its own `chart.py`/`shared/providers/` —
+bar fetching is confined to `shared/providers/quant_data.py`.
 
-- `output.py` — `bars_to_csv(bars) -> str`
+- `output.py` — `bars_to_csv(bars) -> str`; columns include `incomplete`
 - `chart.py` — `render_chart(ticker, session_date, bars, output_path)`; two-subplot matplotlib
   figure (price line on top, volume bars below), x-axis converted to US/Eastern for display
   (storage/CSV stay UTC), each subplot shaded by session via `axvspan`. Raises `AppError` for an
-  empty `bars` list. Uses the `Agg` backend so it runs headless in tests/CI.
+  empty `bars` list. Uses the `Agg` backend so it runs headless in tests/CI. Doesn't currently do
+  anything visually distinct for `incomplete` bars — carried through the data only for now.
 - `cli.py` — `day-chart` entry point; `main()` takes optional `provider: IntraDayProvider`,
-  `settings_path: Path`, and `output_dir: Path` parameters (defaulting to
-  `shared.providers.yahoo_finance.YahooFinanceIntraDay()`, `Settings.load()`'s own default path, and CWD
-  respectively) — same parameter-based DI pattern as `stock_quote.cli`. `output_dir` has no CLI
-  flag (`--output-dir` was deliberately deferred); it exists purely as a test seam, the same role
-  `settings_path` plays. Also owns `resolve_session_date(date_argument, today)` — resolves the
-  `--date` argument to a concrete session date, defaulting to today or rolling back to the prior
-  Friday if today is a weekend, and raising `AppError` for a malformed, future, or weekend date.
+  `settings_path: Path`, and `output_dir: Path` parameters — same parameter-based DI pattern as
+  `stock_quote.cli`. Unlike `stock_quote`, the default provider can't be constructed before
+  settings are loaded (it needs `Settings.postgres` for connection details), so provider
+  construction happens *after* `Settings.load()` succeeds: `QuantDataIntraDay(host=settings.postgres.host,
+  ...)` if no `provider` was injected, raising `AppError` if `settings.postgres` is absent.
+  `output_dir` has no CLI flag (`--output-dir` was deliberately deferred); it exists purely as a
+  test seam, the same role `settings_path` plays. Also owns `resolve_session_date(date_argument,
+  today)` — resolves the `--date` argument to a concrete session date, defaulting to today or
+  rolling back to the prior Friday if today is a weekend, and raising `AppError` for a malformed,
+  future, or weekend date.
 
 ### Test doubles (`tests/`)
 
@@ -96,13 +130,21 @@ confined to `shared/providers/yahoo_finance.py`.
   `fetch_quote(ticker) -> StockQuote` shape as the real provider (no explicit inheritance from the
   `Protocol` — that's the point of structural typing). Reads fixture quotes from
   `tests/data/yahoo_finance_quotes.json`; raises `AppError` for a ticker not in the fixture, same
-  contract as the real implementation. Also `MockYahooFinanceIntraDay`, the same structural-typing
-  approach for `fetch_bars(ticker, target_date) -> list[DayBar]`; reads fixture bars from
-  `tests/data/day_bars.json` and infers each bar's `session` via `shared.sessions.infer_session`,
-  same as the real `YahooFinanceIntraDay`.
+  contract as the real implementation.
+- `tests/mocks/quant_data.py` — `MockQuantDataIntraDay`, the same structural-typing approach for
+  `fetch_bars(ticker, target_date) -> list[DayBar]`; reads fixture bars from
+  `tests/data/quant_data_bars.json` (each entry carries its own `incomplete` value; defaults
+  `False` if omitted) and infers each bar's `session` via `shared.sessions.infer_session`, same as
+  the real `QuantDataIntraDay`. Note this mocks quant-scratch's own `IntraDayProvider` shape
+  end-to-end (for `day_chart` CLI-level tests) — it's a different, lower-level thing from
+  `tests/unit/test_quant_data_provider.py`'s `FakeMarketData`, which mocks quant-data's
+  `MarketData` client specifically to unit-test `QuantDataIntraDay`'s own conversion logic.
 - `tests/data/settings.json` — fixture settings file, DI'd into `Settings.load(path=...)` via
   `stock_quote.cli.main`'s (and `day_chart.cli.main`'s) `settings_path` parameter, so CLI tests
-  don't depend on cwd isolation.
+  don't depend on cwd isolation. Deliberately has no `postgres` section — exercises the "missing
+  config" error path; day-chart's happy-path CLI tests inject a `provider` directly instead of
+  relying on settings-driven construction (which would require a real database connection, and
+  unit tests must run offline).
 
 ## Data flow
 
@@ -111,11 +153,11 @@ a `yfinance` network call; test: `tests.mocks.yahoo_finance.MockYahooFinance`, a
 `StockQuote` → `output.quote_to_csv` → stdout.
 
 `day-chart TICKER [--date ...]` → `cli.resolve_session_date` → injected
-`IntraDayProvider.fetch_bars` (real: `shared.providers.yahoo_finance.YahooFinanceIntraDay`, a `yfinance`
-network call tagging each bar via `shared.sessions.infer_session`; test:
-`tests.mocks.yahoo_finance.MockYahooFinanceIntraDay`, a fixture lookup) → `list[DayBar]` → both
-`chart.render_chart` (→ `<TICKER>_<DATE>_chart.png`) and `output.bars_to_csv` (→
-`<TICKER>_<DATE>_data.csv`), both written to `output_dir` (CWD by default).
+`IntraDayProvider.fetch_bars` (real: `shared.providers.quant_data.QuantDataIntraDay`, wrapping a
+`quant_data.client.market_data.MarketData` read against the Postgres warehouse, tagging each bar
+via `shared.sessions.infer_session`; test: `tests.mocks.quant_data.MockQuantDataIntraDay`, a
+fixture lookup) → `list[DayBar]` → both `chart.render_chart` (→ `<TICKER>_<DATE>_chart.png`) and
+`output.bars_to_csv` (→ `<TICKER>_<DATE>_data.csv`), both written to `output_dir` (CWD by default).
 
 ## Contracts
 
@@ -134,5 +176,5 @@ conforms to, independent of which one is wired in.
   the chart rendering in `day_chart/chart.py` both operate on it rather than living on the
   dataclass itself.
 - `defs.contracts.IntraDayProvider` — behavioral interface implemented by both
-  `shared.providers.yahoo_finance.YahooFinanceIntraDay` (production) and
-  `tests.mocks.yahoo_finance.MockYahooFinanceIntraDay` (tests).
+  `shared.providers.quant_data.QuantDataIntraDay` (production) and
+  `tests.mocks.quant_data.MockQuantDataIntraDay` (tests).

@@ -16,6 +16,7 @@ def test_bars_to_csv_formats_header_and_rows():
             close=472.1,
             volume=250000,
             session="regular",
+            incomplete=False,
         ),
         DayBar(
             timestamp=datetime(2026, 1, 2, 21, 0, tzinfo=timezone.utc),
@@ -23,20 +24,21 @@ def test_bars_to_csv_formats_header_and_rows():
             high=473.5,
             low=472.9,
             close=473.0,
-            volume=9000,
+            volume=0,
             session="after-market",
+            incomplete=True,
         ),
     ]
 
     csv_text = bars_to_csv(bars)
 
     lines = csv_text.strip("\n").split("\n")
-    assert lines[0] == "timestamp,open,high,low,close,volume,session"
-    assert lines[1] == "2026-01-02T14:30:00+00:00,471.5,472.4,471.3,472.1,250000,regular"
-    assert lines[2] == "2026-01-02T21:00:00+00:00,473.2,473.5,472.9,473.0,9000,after-market"
+    assert lines[0] == "timestamp,open,high,low,close,volume,session,incomplete"
+    assert lines[1] == "2026-01-02T14:30:00+00:00,471.5,472.4,471.3,472.1,250000,regular,False"
+    assert lines[2] == "2026-01-02T21:00:00+00:00,473.2,473.5,472.9,473.0,0,after-market,True"
 
 
 def test_bars_to_csv_header_only_for_empty_bars():
     csv_text = bars_to_csv([])
 
-    assert csv_text.strip("\n") == "timestamp,open,high,low,close,volume,session"
+    assert csv_text.strip("\n") == "timestamp,open,high,low,close,volume,session,incomplete"

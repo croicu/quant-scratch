@@ -27,3 +27,4 @@ class DayBar:
     close: float
     volume: int
     session: str  # "pre-market", "regular", or "after-market"
+    incomplete: bool = False  # provider couldn't supply full data for this bar (e.g. missing volume)

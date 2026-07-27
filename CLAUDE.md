@@ -191,7 +191,7 @@ pytest tests/unit/test_foo.py::test_bar   # single test
 ## New Task
 
 ## Pending Tasks
-- **IBKR TWS API extended-hours provider** — [tasks/ibkr_tws_extended_hours.md](tasks/ibkr_tws_extended_hours.md) (brainstorm; chosen path for SPY/QQQ extended-hours volume; blocked on IBKR account approval, 1-3 business days from 2026-07-25)
+- **IBKR TWS API extended-hours provider** — [tasks/ibkr_tws_extended_hours.md](tasks/ibkr_tws_extended_hours.md) (brainstorm; blocked on IBKR account approval, 1-3 business days from 2026-07-25). **Target shifted 2026-07-26**: now that `day-chart` reads from quant-data instead of fetching live, this would land as a new *ingest*-side provider inside `quant-data` (replacing its Yahoo-based `quant-ingest`), not a `quant-scratch` CLI provider — revisit scope once picked back up.
 - **Databento intraday volume provider** — [tasks/databento_intraday_volume.md](tasks/databento_intraday_volume.md) / [issue #5](https://github.com/croicu/quant-scratch/issues/5) (postponed 2026-07-25 in favor of IBKR)
 - **Local chunked data cache (FirstRateData)** — [tasks/local_data_cache_firstratedata.md](tasks/local_data_cache_firstratedata.md) / [issue #6](https://github.com/croicu/quant-scratch/issues/6) (postponed 2026-07-25 in favor of IBKR)
 
@@ -203,9 +203,16 @@ pytest tests/unit/test_foo.py::test_bar   # single test
   standalone repo, [croicu/quant-data](https://github.com/croicu/quant-data) (cloned locally as
   `./quant-data/`, gitignored here — not part of this repo's history). Originated from this repo's
   `tasks/bootstrap_quant_data.md` and `tasks/database_layer.md` (both retired, content now lives in
-  `quant-data`). No code change in `quant-scratch` itself yet — it will eventually depend on
-  `quant-data` for market data instead of each experiment fetching/storing its own, once
-  `quant-data`'s own `tasks/postgres_client_and_dimensions.md` follow-up ships a read client.
+  `quant-data`).
+- **Switch `day-chart` to quant-data's `MarketData` read client** — [issue #7](https://github.com/croicu/quant-scratch/issues/7).
+  New `shared/providers/quant_data.py`'s `QuantDataIntraDay` replaces the removed
+  `YahooFinanceIntraDay` (quant-data's own ingest already covers that Yahoo fetch, so day-chart
+  fetching it again directly was pure duplication). `DayBar` gained an `incomplete` field mirroring
+  quant-data's `OHLCV.incomplete`. `stock_quote`'s `YahooFinance` (live quote lookup) is untouched —
+  quant-data has no live-quote equivalent. Required first fixing a real cross-repo bug (both repos'
+  top-level `defs`/`shared` package names collided once installed together) — see
+  [quant-data#7](https://github.com/croicu/quant-data/issues/7), verified independently from this
+  side before closing.
 
 ## Task Template
 https://github.com/croicu/quant-scratch/blob/main/tasks/new_task.md

@@ -1,6 +1,13 @@
 {
   "settings": {
     "debug": false,
-    "logLevel": "error"
+    "logLevel": "error",
+    "postgres": {
+      "host": "localhost",
+      "port": 5433,
+      "user": "quant_reader",
+      "password": "",
+      "dbname": "quant_data"
+    }
   }
 }

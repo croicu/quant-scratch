@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from day_chart import cli
-from tests.mocks.yahoo_finance import MockYahooFinanceIntraDay
+from tests.mocks.quant_data import MockQuantDataIntraDay
 
 SETTINGS_PATH = Path(__file__).parent.parent / "data" / "settings.json"
 
@@ -53,7 +53,7 @@ def test_resolve_session_date_rejects_weekend_date():
 def test_main_writes_chart_and_csv_and_returns_zero(tmp_path, capsys):
     exit_code = cli.main(
         ["spy", "--date", "2026-01-02"],
-        provider=MockYahooFinanceIntraDay(),
+        provider=MockQuantDataIntraDay(),
         settings_path=SETTINGS_PATH,
         output_dir=tmp_path,
     )
@@ -72,7 +72,7 @@ def test_main_writes_chart_and_csv_and_returns_zero(tmp_path, capsys):
 def test_main_returns_one_on_no_data(tmp_path, capsys):
     exit_code = cli.main(
         ["NOTINFIXTURE", "--date", "2026-01-02"],
-        provider=MockYahooFinanceIntraDay(),
+        provider=MockQuantDataIntraDay(),
         settings_path=SETTINGS_PATH,
         output_dir=tmp_path,
     )
@@ -87,3 +87,15 @@ def test_main_exits_two_on_missing_argument():
         cli.main([])
 
     assert exc_info.value.code == 2
+
+
+def test_main_returns_one_when_postgres_settings_missing(tmp_path, capsys):
+    exit_code = cli.main(
+        ["SPY", "--date", "2026-01-02"],
+        settings_path=SETTINGS_PATH,
+        output_dir=tmp_path,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "postgres" in captured.err
