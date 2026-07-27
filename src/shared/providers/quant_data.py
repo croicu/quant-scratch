@@ -60,20 +60,8 @@ class QuantDataIntraDay:
             raise AppError(f"No data available for '{normalized_ticker}' on {target_date.isoformat()}.")
 
         bars: list[DayBar] = []
-        skipped_count = 0
         for ohlcv in ohlcv_bars:
             timestamp_utc = _ensure_utc(ohlcv.timestamp)
-            try:
-                session = infer_session(timestamp_utc)
-            except AppError:
-                # quant-data's warehouse can contain bars outside the 4:00-20:00 ET window this
-                # repo's session model covers (e.g. thin overnight activity, or stale/anomalous
-                # ingest rows -- see github.com/croicu/quant-data/issues/9). day-chart's whole
-                # purpose is session-transition analysis, so a handful of unclassifiable bars
-                # shouldn't fail the entire fetch; skip them and note the count instead.
-                skipped_count += 1
-                continue
-
             bar = DayBar(
                 timestamp=timestamp_utc,
                 open=ohlcv.open,
@@ -81,22 +69,10 @@ class QuantDataIntraDay:
                 low=ohlcv.low,
                 close=ohlcv.close,
                 volume=ohlcv.volume,
-                session=session,
+                session=infer_session(timestamp_utc),
                 incomplete=ohlcv.incomplete,
             )
             bars.append(bar)
-
-        if skipped_count:
-            Logger.warning(
-                f"day-chart: skipped {skipped_count} bar(s) for {normalized_ticker} on {target_date.isoformat()} outside the 4:00-20:00 ET session window.",
-                category=CATEGORY_INTRADAY_FETCH,
-            )
-
-        if not bars:
-            raise AppError(
-                f"No bars for '{normalized_ticker}' on {target_date.isoformat()} fall within a known session "
-                "(4:00-20:00 ET) — all returned data was outside that window."
-            )
 
         Logger.info(
             f"day-chart: fetched {len(bars)} intraday bars for {normalized_ticker} on {target_date.isoformat()} from quant-data.",

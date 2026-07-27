@@ -76,14 +76,15 @@ and has no CLI/console script of its own.
     Normalizes `OHLCV.timestamp` to UTC-aware before use — it's been observed coming back naive
     despite being documented UTC-aware, which `.astimezone()` (used by both `infer_session` and
     the chart's ET conversion) would otherwise silently misinterpret using the local machine's
-    system timezone (see [quant-data#8](https://github.com/croicu/quant-data/issues/8)). Bars
-    `infer_session` can't classify (outside the 4:00-20:00 ET window quant-data's warehouse isn't
-    guaranteed to respect — see [quant-data#9](https://github.com/croicu/quant-data/issues/9)) are
-    skipped with a logged warning rather than failing the whole fetch, since day-chart's purpose is
-    session analysis and a warehouse consumer shouldn't hard-fail over a few stray rows; an
-    `AppError` is still raised if *every* returned bar is unclassifiable. Connects using
-    `Settings.postgres` (host/port/user/password/dbname); raises `AppError` if that section is
-    missing, if the connection fails, or if no bars are returned at all. Replaced
+    system timezone ([quant-data#8](https://github.com/croicu/quant-data/issues/8), still open —
+    keep this normalization until it's fixed upstream). A bar `infer_session` can't classify
+    (outside the 4:00-20:00 ET window) fails the whole fetch with an `AppError` — quant-data#9 (a
+    write-side bug silently shifting stored timestamps by the ingest session's local timezone) was
+    the actual cause of bars showing up outside that window; now that it's fixed and historical
+    data backfilled, an out-of-window bar again indicates a real problem worth surfacing loudly,
+    not something to skip. Connects using `Settings.postgres` (host/port/user/password/dbname);
+    raises `AppError` if that section is missing, if the connection fails, or if no bars are
+    returned at all. Replaced
     `shared.providers.yahoo_finance.YahooFinanceIntraDay` (removed — see
     [croicu/quant-scratch#7](https://github.com/croicu/quant-scratch/issues/7)): quant-data's own
     ingest already pulls from Yahoo Finance and stores the result, so `day-chart` fetching Yahoo

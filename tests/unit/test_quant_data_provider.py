@@ -89,11 +89,10 @@ def test_fetch_bars_treats_naive_timestamp_as_utc():
     assert bars[0].session == "regular"
 
 
-def test_fetch_bars_skips_bars_outside_known_session_hours():
-    # quant-data's warehouse can contain bars outside the 4:00-20:00 ET window this repo's session
-    # model covers (thin overnight activity, or anomalous ingest rows -- see
-    # github.com/croicu/quant-data/issues/9). day-chart's purpose is session-transition analysis,
-    # so a handful of unclassifiable bars shouldn't fail the entire fetch.
+def test_fetch_bars_raises_on_bar_outside_known_session_hours():
+    # quant-data#9 (timestamps silently shifted by the write-side session timezone) is fixed and
+    # backfilled -- a bar outside the 4:00-20:00 ET window is no longer expected/tolerated, so this
+    # should propagate as a hard failure rather than being silently skipped.
     fake_client = FakeMarketData(
         bars=[
             OHLCV(
@@ -114,29 +113,6 @@ def test_fetch_bars_skips_bars_outside_known_session_hours():
                 low=471.3,
                 close=472.1,
                 volume=250000,
-                incomplete=False,
-            ),
-        ]
-    )
-    provider = QuantDataIntraDay(client=fake_client)
-
-    bars = provider.fetch_bars("SPY", date(2026, 1, 2))
-
-    assert len(bars) == 1
-    assert bars[0].session == "regular"
-
-
-def test_fetch_bars_raises_when_all_bars_outside_known_session_hours():
-    fake_client = FakeMarketData(
-        bars=[
-            OHLCV(
-                ticker="SPY",
-                timestamp=datetime(2026, 1, 2, 6, 30, tzinfo=timezone.utc),  # 01:30 ET -- no session
-                open=100.0,
-                high=101.0,
-                low=99.0,
-                close=100.5,
-                volume=858048,
                 incomplete=False,
             ),
         ]
