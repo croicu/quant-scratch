@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
-from quant_data.client.market_data import MarketData
+from quant_data import MarketData, create_postgres_provider
 
 from defs.protocols import DayBar
 
@@ -14,8 +14,8 @@ CATEGORY_INTRADAY_FETCH = "intraday_fetch"
 
 
 def _ensure_utc(timestamp: datetime) -> datetime:
-    # quant_data.defs.protocols.OHLCV.timestamp is documented "timezone-aware, UTC", but
-    # MarketData has been observed returning naive datetimes (psycopg's default for a Postgres
+    # quant_data.OHLCV.timestamp is documented "timezone-aware, UTC", but MarketData has been
+    # observed returning naive datetimes (psycopg's default for a Postgres
     # TIMESTAMP WITHOUT TIME ZONE column) -- a naive value silently gets reinterpreted as the
     # *system's local timezone* by datetime.astimezone(), which infer_session and the chart's ET
     # conversion both call. Normalizing here means session/chart correctness doesn't depend on
@@ -43,7 +43,8 @@ class QuantDataIntraDay:
             raise AppError("QuantDataIntraDay requires host/port/dbname (or an injected client).")
 
         try:
-            self._client = MarketData(host=host, port=port, dbname=dbname, user=user, password=password)
+            provider = create_postgres_provider(host=host, port=port, dbname=dbname, user=user, password=password)
+            self._client = MarketData(provider)
         except Exception as error:
             raise AppError(f"Failed to connect to quant-data at {host}:{port}/{dbname}: {error}") from error
 

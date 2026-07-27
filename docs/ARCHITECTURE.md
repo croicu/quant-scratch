@@ -62,9 +62,16 @@ and has no CLI/console script of its own.
     has no equivalent concept, only historical bars, so this one wasn't replaced.
   - `quant_data.py` — `QuantDataIntraDay`, the default implementation of
     `defs.contracts.IntraDayProvider`. Thin wrapper around
-    [quant-data](https://github.com/croicu/quant-data)'s `quant_data.client.market_data.MarketData`
-    read client: calls `fetch_bars(ticker, target_date, target_date)` (a single-day range) and
-    converts each returned `quant_data.defs.protocols.OHLCV` into this repo's own `DayBar`,
+    [quant-data](https://github.com/croicu/quant-data)'s public `MarketData` read client — imports
+    only from the `quant_data` top level (`from quant_data import MarketData,
+    create_postgres_provider`), per quant-data's own stable-surface contract
+    ([quant-data#10](https://github.com/croicu/quant-data/issues/10)/
+    [quant-scratch#8](https://github.com/croicu/quant-scratch/issues/8)): builds a provider via
+    `create_postgres_provider(host=..., port=..., dbname=..., user=..., password=...)` and passes
+    it to `MarketData(provider)` — `MarketData` itself no longer takes connection details directly,
+    so it stays agnostic of Postgres specifically (a future non-Postgres backend wouldn't need
+    another breaking change here). Calls `fetch_bars(ticker, target_date, target_date)` (a
+    single-day range) and converts each returned `quant_data.OHLCV` into this repo's own `DayBar`,
     computing `session` via `sessions.infer_session` and carrying `incomplete` straight through.
     Normalizes `OHLCV.timestamp` to UTC-aware before use — it's been observed coming back naive
     despite being documented UTC-aware, which `.astimezone()` (used by both `infer_session` and
@@ -154,8 +161,8 @@ a `yfinance` network call; test: `tests.mocks.yahoo_finance.MockYahooFinance`, a
 
 `day-chart TICKER [--date ...]` → `cli.resolve_session_date` → injected
 `IntraDayProvider.fetch_bars` (real: `shared.providers.quant_data.QuantDataIntraDay`, wrapping a
-`quant_data.client.market_data.MarketData` read against the Postgres warehouse, tagging each bar
-via `shared.sessions.infer_session`; test: `tests.mocks.quant_data.MockQuantDataIntraDay`, a
+`quant_data.MarketData` read against the Postgres warehouse, tagging each bar via
+`shared.sessions.infer_session`; test: `tests.mocks.quant_data.MockQuantDataIntraDay`, a
 fixture lookup) → `list[DayBar]` → both `chart.render_chart` (→ `<TICKER>_<DATE>_chart.png`) and
 `output.bars_to_csv` (→ `<TICKER>_<DATE>_data.csv`), both written to `output_dir` (CWD by default).
 

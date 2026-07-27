@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 
 import pytest
-from quant_data.defs.protocols import OHLCV
+from quant_data import OHLCV
 
 from defs.protocols import DayBar
 from shared.errors import AppError
