@@ -8,7 +8,7 @@
       "module": "stock_quote.cli",
       "args": ["${input:ticker}"],
       "console": "integratedTerminal",
-      "justMyCode": true
+      "justMyCode": false
     },
     {
       "name": "Python: Run day-chart (CLI)",
@@ -17,7 +17,7 @@
       "module": "day_chart.cli",
       "args": ["${input:ticker}"],
       "console": "integratedTerminal",
-      "justMyCode": true
+      "justMyCode": false
     },
     {
       "name": "Python: Run Unit Tests",
