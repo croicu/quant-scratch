@@ -33,6 +33,8 @@ class QuantDataIntraDay:
         dbname: str | None = None,
         user: str = "quant_reader",
         password: str = "",
+        ssh_user: str | None = None,
+        ssh_key_path: str | None = None,
         client: MarketData | None = None,
     ) -> None:
         if client is not None:
@@ -43,7 +45,15 @@ class QuantDataIntraDay:
             raise AppError("QuantDataIntraDay requires host/port/dbname (or an injected client).")
 
         try:
-            provider = create_postgres_provider(host=host, port=port, dbname=dbname, user=user, password=password)
+            provider = create_postgres_provider(
+                host=host,
+                port=port,
+                dbname=dbname,
+                user=user,
+                password=password,
+                ssh_user=ssh_user,
+                ssh_key_path=ssh_key_path,
+            )
             self._client = MarketData(provider)
         except Exception as error:
             raise AppError(f"Failed to connect to quant-data at {host}:{port}/{dbname}: {error}") from error

@@ -34,16 +34,23 @@ and has no CLI/console script of its own.
 
 - `diagnostics.py` — `Logger`, log sinks (`ConsoleLogSink`), telemetry levels/records
 - `settings.py` — `Settings.load(path, local_path)` / `Settings.current()`, reads `settings.json` +
-  `settings.local.json` by default; both paths are DI'd parameters (default `./settings.json` /
-  `./settings.local.json`) rather than hardcoded, so callers/tests can point at a fixture instead.
-  Also `PostgresSettings` (`host`, `port`, `user`, `password`, `dbname`) and a `Settings.postgres`
-  field, parsed from a `postgres` object under `settings.json`/`settings.local.json`'s `settings`
-  key — mirrors quant-data's own `PostgresSettings` shape exactly. None of these values are secret
-  for a client connecting through an already-authenticated local SSH tunnel (`host`/`port` are just
-  the local tunnel endpoint, e.g. `localhost`/`5433`; the `quant_reader` role has no password), so
-  the whole section can live in the committed `settings.json`, not `settings.local.json` — see
-  quant-data's `docs/DATABASE.md` for what actually needs to stay private (the box's real
-  hostname/SSH credentials, which never appear in either repo's committed files).
+  `settings.local.json` by default; `path` is a DI'd parameter (default `./settings.json`) so
+  callers/tests can point at a fixture instead. `local_path` defaults to a `settings.local.json`
+  *sibling of `path`*, not a fixed repo-root path — resolved that way specifically so a caller/test
+  passing a custom `path` (e.g. a fixture settings file) can't accidentally pick up whatever real
+  `settings.local.json` happens to sit at the real cwd's repo root; passing `local_path` explicitly
+  still overrides this. Also `PostgresSettings` (`host`, `port`, `user`, `password`, `dbname`, plus
+  optional `ssh_user`/`ssh_key_path` — both-or-neither, `TaskError` if only one is set) and a
+  `Settings.postgres` field, parsed from a `postgres` object under `settings.json`/
+  `settings.local.json`'s `settings` key (JSON keys `sshUser`/`sshKeyPath`) — mirrors quant-data's
+  own `PostgresSettings` shape exactly, including the optional SSH fields
+  ([croicu/quant-data#17](https://github.com/croicu/quant-data/issues/17)). `host`/`port`/`user`/
+  `password`/`dbname` aren't secret for a client connecting through an already-authenticated local
+  SSH tunnel (`host`/`port` are just the local tunnel endpoint, e.g. `localhost`/`5433`; the
+  `quant_reader` role has no password), so that much can live in the committed `settings.json`. The
+  real box hostname and `ssh_user`/`ssh_key_path` needed for quant-data's new auto-tunnel path are
+  a different matter — those go in `settings.local.json` (gitignored) only, never a committed file
+  — see quant-data's `docs/DATABASE.md`'s `<ubuntu_host>`/`<ssh_user>` placeholders.
 - `errors.py` — `AppError`, `TaskError`, `telemetry_session()`
 - `sessions.py` — `infer_session(timestamp_utc) -> str`, classifying a UTC timestamp into
   `"pre-market"` (4:00–9:30 ET), `"regular"` (9:30–16:00 ET), or `"after-market"` (16:00–20:00 ET);
@@ -67,10 +74,15 @@ and has no CLI/console script of its own.
     create_postgres_provider`), per quant-data's own stable-surface contract
     ([quant-data#10](https://github.com/croicu/quant-data/issues/10)/
     [quant-scratch#8](https://github.com/croicu/quant-scratch/issues/8)): builds a provider via
-    `create_postgres_provider(host=..., port=..., dbname=..., user=..., password=...)` and passes
-    it to `MarketData(provider)` — `MarketData` itself no longer takes connection details directly,
-    so it stays agnostic of Postgres specifically (a future non-Postgres backend wouldn't need
-    another breaking change here). Calls `fetch_bars(ticker, target_date, target_date)` (a
+    `create_postgres_provider(host=..., port=..., dbname=..., user=..., password=..., ssh_user=...,
+    ssh_key_path=...)` and passes it to `MarketData(provider)` — `MarketData` itself no longer
+    takes connection details directly, so it stays agnostic of Postgres specifically (a future
+    non-Postgres backend wouldn't need another breaking change here). `ssh_user`/`ssh_key_path`
+    default to `None` (today's direct-connect behavior, unchanged); when both are set, quant-data
+    opens and manages its own SSH tunnel instead of assuming one's already running externally
+    ([croicu/quant-data#17](https://github.com/croicu/quant-data/issues/17)/
+    [croicu/quant-scratch#10](https://github.com/croicu/quant-scratch/issues/10)). Calls
+    `fetch_bars(ticker, target_date, target_date)` (a
     single-day range) and converts each returned `quant_data.OHLCV` into this repo's own `DayBar`,
     computing `session` via `sessions.infer_session` and carrying `incomplete` straight through.
     Normalizes `OHLCV.timestamp` to UTC-aware before use — it's been observed coming back naive
@@ -82,8 +94,9 @@ and has no CLI/console script of its own.
     write-side bug silently shifting stored timestamps by the ingest session's local timezone) was
     the actual cause of bars showing up outside that window; now that it's fixed and historical
     data backfilled, an out-of-window bar again indicates a real problem worth surfacing loudly,
-    not something to skip. Connects using `Settings.postgres` (host/port/user/password/dbname);
-    raises `AppError` if that section is missing, if the connection fails, or if no bars are
+    not something to skip. Connects using `Settings.postgres`
+    (host/port/user/password/dbname/ssh_user/ssh_key_path); raises `AppError` if that section is
+    missing, if the connection fails, or if no bars are
     returned at all. Replaced
     `shared.providers.yahoo_finance.YahooFinanceIntraDay` (removed — see
     [croicu/quant-scratch#7](https://github.com/croicu/quant-scratch/issues/7)): quant-data's own

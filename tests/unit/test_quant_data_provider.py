@@ -7,6 +7,7 @@ from quant_data import OHLCV
 
 from defs.protocols import DayBar
 from shared.errors import AppError
+from shared.providers import quant_data as quant_data_module
 from shared.providers.quant_data import QuantDataIntraDay
 
 
@@ -140,3 +141,25 @@ def test_fetch_bars_raises_on_client_error():
 def test_constructor_requires_client_or_connection_details():
     with pytest.raises(AppError):
         QuantDataIntraDay()
+
+
+def test_constructor_forwards_ssh_kwargs_to_create_postgres_provider(monkeypatch):
+    captured_kwargs = {}
+
+    def fake_create_postgres_provider(**kwargs):
+        captured_kwargs.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(quant_data_module, "create_postgres_provider", fake_create_postgres_provider)
+    monkeypatch.setattr(quant_data_module, "MarketData", lambda provider: FakeMarketData())
+
+    QuantDataIntraDay(
+        host="CroicuWS1",
+        port=5432,
+        dbname="quant_data",
+        ssh_user="alex",
+        ssh_key_path="/home/alex/.ssh/id_ed25519",
+    )
+
+    assert captured_kwargs["ssh_user"] == "alex"
+    assert captured_kwargs["ssh_key_path"] == "/home/alex/.ssh/id_ed25519"

@@ -40,10 +40,11 @@ CLI signature and file format schemas for `quant-scratch`.
   on missing/bad args).
 - On success, prints the written CSV path to stdout (after you press Enter to close the popup).
 
-### Settings: `postgres` section (`settings.json`)
+### Settings: `postgres` section (`settings.json` / `settings.local.json`)
 
-Required by `day-chart` (see above). None of these values are secret for a client connecting
-through an already-established local SSH tunnel, so this can live in the committed `settings.json`:
+Required by `day-chart` (see above). `host`/`port`/`user`/`password`/`dbname` aren't secret for a
+client connecting through an already-established local SSH tunnel, so that much can live in the
+committed `settings.json`:
 
 ```json
 {
@@ -59,9 +60,34 @@ through an already-established local SSH tunnel, so this can live in the committ
 }
 ```
 
-`host`/`port` are the local tunnel endpoint, not the real database box — see quant-data's
-`docs/DATABASE.md` for setting up that tunnel (which does involve real, non-committed credentials,
-kept out of both repos' tracked files).
+`host`/`port` are the local tunnel endpoint, not the real database box — this shape assumes you
+already have a manual SSH tunnel running (see quant-data's `docs/DATABASE.md`).
+
+**Optional `sshUser`/`sshKeyPath`** (added [croicu/quant-data#17](https://github.com/croicu/quant-data/issues/17)):
+when both are set, quant-data's `create_postgres_provider` opens and manages its own SSH tunnel
+instead — no manually-run tunnel needed. Must be set together or not at all (`day-chart` raises an
+error otherwise). When used, `host`/`port` switch meaning to the *real database box and its actual
+Postgres port* (not a local tunnel endpoint):
+
+```json
+{
+  "settings": {
+    "postgres": {
+      "host": "<ubuntu_host>",
+      "port": 5432,
+      "user": "quant_reader",
+      "password": "",
+      "dbname": "quant_data",
+      "sshUser": "<ssh_user>",
+      "sshKeyPath": "/path/to/private/key"
+    }
+  }
+}
+```
+
+The real hostname/`sshUser`/`sshKeyPath` are not secret in the sense of needing encryption, but
+they identify a specific private machine — keep this block in `settings.local.json` (gitignored),
+never the committed `settings.json`.
 
 ## File formats
 

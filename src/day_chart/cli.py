@@ -103,6 +103,8 @@ def main(
                 dbname=settings.postgres.dbname,
                 user=settings.postgres.user,
                 password=settings.postgres.password,
+                ssh_user=settings.postgres.ssh_user,
+                ssh_key_path=settings.postgres.ssh_key_path,
             )
     except AppError as error:
         print(f"day-chart: error: {error}", file=sys.stderr)

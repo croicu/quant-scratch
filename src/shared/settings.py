@@ -9,7 +9,7 @@ from .diagnostics import CATEGORY_GENERAL, TelemetryLevel
 from .errors import TaskError
 
 _SETTINGS_PATH = Path("./settings.json")
-_LOCAL_PATH = Path("./settings.local.json")
+_LOCAL_FILENAME = "settings.local.json"
 
 
 @dataclass
@@ -19,6 +19,8 @@ class PostgresSettings:
     user: str
     password: str
     dbname: str
+    ssh_user: str | None = None
+    ssh_key_path: str | None = None
 
 
 @dataclass
@@ -32,7 +34,13 @@ class Settings:
     _instance: ClassVar[Settings | None] = None
 
     @classmethod
-    def load(cls, path: Path = _SETTINGS_PATH, local_path: Path = _LOCAL_PATH) -> Settings:
+    def load(cls, path: Path = _SETTINGS_PATH, local_path: Path | None = None) -> Settings:
+        # local_path defaults to a settings.local.json sibling of `path`, not a fixed repo-root
+        # path -- otherwise a test/consumer passing a custom `path` (e.g. a fixture settings.json)
+        # would still silently pick up whatever real settings.local.json happens to sit at the
+        # real cwd's repo root, breaking isolation.
+        active_local_path = (path.parent / _LOCAL_FILENAME) if local_path is None else local_path
+
         debug = False
         log_level = TelemetryLevel.ERROR
         log_categories: list[str] = []
@@ -50,8 +58,8 @@ class Settings:
                 raise TaskError("'settings' in settings.json must be a JSON object.")
             settings_payload = dict(base_settings)
 
-        if local_path.exists():
-            with local_path.open("r", encoding="utf-8") as f:
+        if active_local_path.exists():
+            with active_local_path.open("r", encoding="utf-8") as f:
                 local_payload = json.load(f)
             if isinstance(local_payload, dict):
                 local_settings = local_payload.get("settings", {})
@@ -105,12 +113,20 @@ class Settings:
                     missing_keys.append(key)
             if missing_keys:
                 raise TaskError(f"'settings.postgres' is missing required key(s): {', '.join(missing_keys)}")
+
+            ssh_user = postgres_payload.get("sshUser")
+            ssh_key_path = postgres_payload.get("sshKeyPath")
+            if (ssh_user is None) != (ssh_key_path is None):
+                raise TaskError("'settings.postgres.sshUser' and 'sshKeyPath' must both be set, or neither.")
+
             postgres_settings = PostgresSettings(
                 host=str(postgres_payload["host"]),
                 port=int(postgres_payload["port"]),
                 user=str(postgres_payload["user"]),
                 password=str(postgres_payload["password"]),
                 dbname=str(postgres_payload["dbname"]),
+                ssh_user=None if ssh_user is None else str(ssh_user),
+                ssh_key_path=None if ssh_key_path is None else str(ssh_key_path),
             )
 
         cls._instance = cls(
