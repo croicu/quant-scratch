@@ -115,22 +115,32 @@ dependency on `quant_data` or `matplotlib.pyplot` outside its own `chart.py`/`sh
 bar fetching is confined to `shared/providers/quant_data.py`.
 
 - `output.py` — `bars_to_csv(bars) -> str`; columns include `incomplete`
-- `chart.py` — `render_chart(ticker, session_date, bars, output_path)`; two-subplot matplotlib
-  figure (price line on top, volume bars below), x-axis converted to US/Eastern for display
-  (storage/CSV stay UTC), each subplot shaded by session via `axvspan`. Raises `AppError` for an
-  empty `bars` list. Uses the `Agg` backend so it runs headless in tests/CI. Doesn't currently do
-  anything visually distinct for `incomplete` bars — carried through the data only for now.
+- `chart.py` — `render_chart(ticker, session_date, bars) -> Figure`; pure figure construction, two
+  vertically stacked subplots (price line on top, volume bars below), x-axis converted to
+  US/Eastern for display (storage/CSV stay UTC), each subplot shaded by session via `axvspan`.
+  Raises `AppError` for an empty `bars` list. Runs under the `Agg` backend (module default) so it's
+  headless-safe in tests/CI. Doesn't currently do anything visually distinct for `incomplete` bars
+  — carried through the data only for now. `show_chart(ticker, session_date, bars)` is the
+  interactive entry point: switches to the `TkAgg` backend, calls `render_chart`, shows the figure
+  non-blocking (`plt.show(block=False)`), then blocks on an `input()` prompt in the terminal before
+  closing the figure. Uses the keypress gate rather than relying on `plt.show()`'s own blocking
+  mainloop — that didn't reliably block when launched under the VS Code debugger (debugpy), closing
+  the popup instantly. Kept separate from `render_chart` specifically so unit tests can exercise
+  figure construction without ever touching a GUI backend.
 - `cli.py` — `day-chart` entry point; `main()` takes optional `provider: IntraDayProvider`,
-  `settings_path: Path`, and `output_dir: Path` parameters — same parameter-based DI pattern as
-  `stock_quote.cli`. Unlike `stock_quote`, the default provider can't be constructed before
-  settings are loaded (it needs `Settings.postgres` for connection details), so provider
-  construction happens *after* `Settings.load()` succeeds: `QuantDataIntraDay(host=settings.postgres.host,
-  ...)` if no `provider` was injected, raising `AppError` if `settings.postgres` is absent.
-  `output_dir` has no CLI flag (`--output-dir` was deliberately deferred); it exists purely as a
-  test seam, the same role `settings_path` plays. Also owns `resolve_session_date(date_argument,
-  today)` — resolves the `--date` argument to a concrete session date, defaulting to today or
-  rolling back to the prior Friday if today is a weekend, and raising `AppError` for a malformed,
-  future, or weekend date.
+  `settings_path: Path`, `output_dir: Path`, and `show_chart: ShowChartFn` parameters — same
+  parameter-based DI pattern as `stock_quote.cli` (tests inject a non-GUI stand-in for
+  `show_chart`, same reason `provider` is injected instead of hitting a real database). Unlike
+  `stock_quote`, the default provider can't be constructed before settings are loaded (it needs
+  `Settings.postgres` for connection details), so provider construction happens *after*
+  `Settings.load()` succeeds: `QuantDataIntraDay(host=settings.postgres.host, ...)` if no
+  `provider` was injected, raising `AppError` if `settings.postgres` is absent. `output_dir` has no
+  CLI flag (`--output-dir` was deliberately deferred); it exists purely as a test seam, the same
+  role `settings_path` plays — it now only affects where the CSV lands, since the chart itself is
+  shown in a popup rather than saved. Also owns `resolve_session_date(date_argument, today)` —
+  resolves the `--date` argument to a concrete session date, defaulting to today or rolling back to
+  the prior Friday if today is a weekend, and raising `AppError` for a malformed, future, or
+  weekend date.
 
 ### Test doubles (`tests/`)
 
@@ -164,8 +174,9 @@ a `yfinance` network call; test: `tests.mocks.yahoo_finance.MockYahooFinance`, a
 `IntraDayProvider.fetch_bars` (real: `shared.providers.quant_data.QuantDataIntraDay`, wrapping a
 `quant_data.MarketData` read against the Postgres warehouse, tagging each bar via
 `shared.sessions.infer_session`; test: `tests.mocks.quant_data.MockQuantDataIntraDay`, a
-fixture lookup) → `list[DayBar]` → both `chart.render_chart` (→ `<TICKER>_<DATE>_chart.png`) and
-`output.bars_to_csv` (→ `<TICKER>_<DATE>_data.csv`), both written to `output_dir` (CWD by default).
+fixture lookup) → `list[DayBar]` → both injected `show_chart` (real: `chart.show_chart`, a blocking
+popup window; test: a non-GUI stand-in) and `output.bars_to_csv` (→ `<TICKER>_<DATE>_data.csv`,
+written to `output_dir`, CWD by default).
 
 ## Contracts
 

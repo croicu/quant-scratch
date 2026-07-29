@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
-from pathlib import Path
+from datetime import date, datetime, time, timedelta
 
 import matplotlib
 
@@ -9,6 +8,7 @@ matplotlib.use("Agg")
 
 import matplotlib.dates as mdates  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.figure import Figure  # noqa: E402
 
 from defs.protocols import DayBar  # noqa: E402
 from shared.errors import AppError  # noqa: E402
@@ -21,8 +21,18 @@ _SESSION_COLORS = {
 }
 _DEFAULT_SESSION_COLOR = "#ffffff"
 
+_INTERACTIVE_BACKEND = "TkAgg"
 
-def render_chart(ticker: str, session_date: date, bars: list[DayBar], output_path: Path) -> None:
+
+def show_chart(ticker: str, session_date: date, bars: list[DayBar]) -> None:
+    plt.switch_backend(_INTERACTIVE_BACKEND)
+    figure = render_chart(ticker, session_date, bars)
+    plt.show(block=False)
+    input("Press Enter to close the chart...")
+    plt.close(figure)
+
+
+def render_chart(ticker: str, session_date: date, bars: list[DayBar]) -> Figure:
     if not bars:
         raise AppError(f"Cannot render chart for '{ticker}': no bars provided.")
 
@@ -36,7 +46,7 @@ def render_chart(ticker: str, session_date: date, bars: list[DayBar], output_pat
         volumes.append(bar.volume)
         sessions.append(bar.session)
 
-    figure, (price_axis, volume_axis) = plt.subplots(2, 1, sharex=True, figsize=(12, 8))
+    figure, (price_axis, volume_axis) = plt.subplots(2, 1, sharex=True, figsize=(12, 8), gridspec_kw={"height_ratios": [3, 1]})
 
     price_axis.plot(timestamps_et, closes, color="#1f2937", linewidth=1)
     price_axis.set_ylabel("Price")
@@ -49,11 +59,14 @@ def render_chart(ticker: str, session_date: date, bars: list[DayBar], output_pat
     _shade_sessions(price_axis, timestamps_et, sessions)
     _shade_sessions(volume_axis, timestamps_et, sessions)
 
+    session_start = datetime.combine(session_date, time.min, tzinfo=EASTERN)
+    session_end = session_start + timedelta(days=1)
+    volume_axis.set_xlim(session_start, session_end)
+
     volume_axis.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M", tz=EASTERN))
     figure.autofmt_xdate()
     figure.tight_layout()
-    figure.savefig(output_path)
-    plt.close(figure)
+    return figure
 
 
 def _shade_sessions(axis, timestamps_et: list[datetime], sessions: list[str]) -> None:

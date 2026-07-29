@@ -21,8 +21,10 @@ CLI signature and file format schemas for `quant-scratch`.
 - Usage: `day-chart TICKER [--date YYYY-MM-DD] [--debug]`
 - Fetches full-day (pre-market + regular + after-market) 1-minute OHLCV bars for a single ticker
   (case-insensitive) from the [quant-data](https://github.com/croicu/quant-data) warehouse (not
-  live from yfinance — see `docs/ARCHITECTURE.md`) and writes a matplotlib chart plus a CSV export
-  to the current working directory.
+  live from yfinance — see `docs/ARCHITECTURE.md`), pops up an interactive matplotlib chart window,
+  and writes a CSV export to the current working directory. The popup stays open until you press
+  Enter in the terminal — that's a deliberate keypress gate, not `plt.show()`'s own blocking (which
+  doesn't reliably block under a debugger).
 - Requires a `postgres` section in `settings.json` (see `docs/PROTOCOL.md`'s settings note below
   and quant-data's own `docs/DATABASE.md` for connecting to the box) — missing it is an `AppError`
   (exit `1`), same as any other fetch failure.
@@ -36,7 +38,7 @@ CLI signature and file format schemas for `quant-scratch`.
 - Exit codes: `0` success, `1` invalid ticker / invalid date / no data available / missing
   `postgres` settings / connection error, `2` argument parsing error (argparse's default behavior
   on missing/bad args).
-- On success, prints the two written file paths to stdout.
+- On success, prints the written CSV path to stdout (after you press Enter to close the popup).
 
 ### Settings: `postgres` section (`settings.json`)
 
@@ -105,12 +107,15 @@ One header row followed by one data row per 1-minute bar:
 | `session` | string | `"pre-market"`, `"regular"`, or `"after-market"` |
 | `incomplete` | bool | `True` if quant-data's provider couldn't supply full data for this bar (e.g. no pre/after-market volume) |
 
-### Day-chart PNG (`<TICKER>_<DATE>_chart.png`)
+### Day-chart popup window
 
-A matplotlib figure with two vertically stacked subplots sharing an x-axis (rendered in US/Eastern
-time): price (line) on top, volume (bar) below. Each subplot shades its background by session
-(pre-market / regular / after-market) using `axvspan`. Doesn't currently render `incomplete`
-visually — that information is only in the CSV/`DayBar` data for now.
+No longer written to disk — `day-chart` displays it as an interactive matplotlib window instead
+(`day_chart.chart.show_chart`, `TkAgg` backend, non-blocking `plt.show()` gated by an `input()`
+keypress prompt in the terminal). A figure with two vertically
+stacked subplots sharing an x-axis (rendered in US/Eastern time): price (line) on top, volume (bar)
+below. Each subplot shades its background by session (pre-market / regular / after-market) using
+`axvspan`. Doesn't currently render `incomplete` visually — that information is only in the
+CSV/`DayBar` data for now.
 
 ### Mock intraday bars fixture (`tests/data/quant_data_bars.json`)
 

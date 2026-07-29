@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from day_chart.chart import render_chart
+from day_chart import chart
 from defs.protocols import DayBar
 from shared.errors import AppError
 
@@ -21,20 +21,35 @@ def _bar(hour_utc: int, minute_utc: int, session: str) -> DayBar:
     )
 
 
-def test_render_chart_writes_png_file(tmp_path):
+def test_render_chart_returns_figure_with_price_and_volume_axes():
     bars = [
         _bar(9, 0, "pre-market"),
         _bar(14, 30, "regular"),
         _bar(21, 0, "after-market"),
     ]
-    output_path = tmp_path / "SPY_2026-01-02_chart.png"
 
-    render_chart("SPY", datetime(2026, 1, 2).date(), bars, output_path)
+    figure = chart.render_chart("SPY", datetime(2026, 1, 2).date(), bars)
 
-    assert output_path.exists()
-    assert output_path.stat().st_size > 0
+    assert len(figure.axes) == 2
+    chart.plt.close(figure)
 
 
-def test_render_chart_raises_on_empty_bars(tmp_path):
+def test_render_chart_raises_on_empty_bars():
     with pytest.raises(AppError):
-        render_chart("SPY", datetime(2026, 1, 2).date(), [], tmp_path / "chart.png")
+        chart.render_chart("SPY", datetime(2026, 1, 2).date(), [])
+
+
+def test_show_chart_switches_backend_shows_and_waits_for_keypress(monkeypatch):
+    bars = [_bar(9, 0, "pre-market"), _bar(14, 30, "regular")]
+    switched_to = []
+    shown = []
+    prompted = []
+    monkeypatch.setattr(chart.plt, "switch_backend", switched_to.append)
+    monkeypatch.setattr(chart.plt, "show", lambda block=True: shown.append(block))
+    monkeypatch.setattr("builtins.input", lambda prompt="": prompted.append(prompt))
+
+    chart.show_chart("SPY", datetime(2026, 1, 2).date(), bars)
+
+    assert switched_to == [chart._INTERACTIVE_BACKEND]
+    assert shown == [False]
+    assert len(prompted) == 1

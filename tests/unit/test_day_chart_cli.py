@@ -50,23 +50,26 @@ def test_resolve_session_date_rejects_weekend_date():
         cli.resolve_session_date("2026-01-03", today=date(2026, 1, 5))  # Saturday
 
 
-def test_main_writes_chart_and_csv_and_returns_zero(tmp_path, capsys):
+def test_main_shows_chart_and_writes_csv_and_returns_zero(tmp_path, capsys):
+    shown_calls = []
+
     exit_code = cli.main(
         ["spy", "--date", "2026-01-02"],
         provider=MockQuantDataIntraDay(),
         settings_path=SETTINGS_PATH,
         output_dir=tmp_path,
+        show_chart=lambda ticker, session_date, bars: shown_calls.append((ticker, session_date, bars)),
     )
 
     captured = capsys.readouterr()
-    chart_path = tmp_path / "SPY_2026-01-02_chart.png"
     csv_path = tmp_path / "SPY_2026-01-02_data.csv"
 
     assert exit_code == 0
-    assert chart_path.exists()
     assert csv_path.exists()
-    assert str(chart_path) in captured.out
     assert str(csv_path) in captured.out
+    assert len(shown_calls) == 1
+    assert shown_calls[0][0] == "SPY"
+    assert shown_calls[0][1] == date(2026, 1, 2)
 
 
 def test_main_returns_one_on_no_data(tmp_path, capsys):

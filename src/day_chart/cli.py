@@ -2,18 +2,22 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 
 from defs.contracts import IntraDayProvider
+from defs.protocols import DayBar
 from shared.diagnostics import ConsoleLogSink, Logger
 from shared.errors import AppError
 from shared.providers.quant_data import QuantDataIntraDay
 from shared.settings import Settings
 
-from .chart import render_chart
+from . import chart
 from .output import bars_to_csv
+
+ShowChartFn = Callable[[str, date, list[DayBar]], None]
 
 
 @dataclass
@@ -27,7 +31,7 @@ def parse_args(argv: list[str]) -> CliArguments:
     parser = argparse.ArgumentParser(
         prog="day-chart",
         usage="day-chart TICKER [--date YYYY-MM-DD] [--debug]",
-        description="Fetch full-day intraday bars for a stock ticker and generate a price/volume chart plus CSV export.",
+        description="Fetch full-day intraday bars for a stock ticker, pop up a price/volume chart, and export a CSV.",
     )
 
     parser.add_argument("ticker", help="stock ticker symbol, e.g. SPY")
@@ -80,6 +84,7 @@ def main(
     provider: IntraDayProvider | None = None,
     settings_path: Path | None = None,
     output_dir: Path | None = None,
+    show_chart: ShowChartFn | None = None,
 ) -> int:
     arguments = parse_args(sys.argv[1:] if argv is None else argv)
     active_output_dir = Path(".") if output_dir is None else output_dir
@@ -112,18 +117,18 @@ def main(
             excluded_categories=settings.excluded_categories,
         )
     )
+    active_show_chart = chart.show_chart if show_chart is None else show_chart
+
     try:
         normalized_ticker = arguments.ticker.upper()
         session_date = resolve_session_date(arguments.date)
         bars = active_provider.fetch_bars(normalized_ticker, session_date)
 
-        chart_path = active_output_dir / f"{normalized_ticker}_{session_date.isoformat()}_chart.png"
         csv_path = active_output_dir / f"{normalized_ticker}_{session_date.isoformat()}_data.csv"
 
-        render_chart(normalized_ticker, session_date, bars, chart_path)
+        active_show_chart(normalized_ticker, session_date, bars)
         csv_path.write_text(bars_to_csv(bars), encoding="utf-8", newline="")
 
-        print(f"day-chart: wrote {chart_path}")
         print(f"day-chart: wrote {csv_path}")
         return 0
     except AppError as error:
