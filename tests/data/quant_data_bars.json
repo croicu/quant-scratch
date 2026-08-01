@@ -7,6 +7,12 @@
       { "timestamp": "2026-01-02T18:00:00+00:00", "open": 473.0, "high": 473.6, "low": 472.7, "close": 473.2, "volume": 180000, "incomplete": false },
       { "timestamp": "2026-01-02T21:00:00+00:00", "open": 473.2, "high": 473.5, "low": 472.9, "close": 473.0, "volume": 9000, "incomplete": false },
       { "timestamp": "2026-01-02T23:00:00+00:00", "open": 472.9, "high": 473.1, "low": 472.6, "close": 472.8, "volume": 0, "incomplete": true }
+    ],
+    "2026-01-05": [
+      { "timestamp": "2026-01-05T09:00:00+00:00", "open": 473.5, "high": 474.0, "low": 473.2, "close": 473.8, "volume": 0, "incomplete": true },
+      { "timestamp": "2026-01-05T14:30:00+00:00", "open": 474.0, "high": 475.1, "low": 473.9, "close": 474.9, "volume": 260000, "incomplete": false },
+      { "timestamp": "2026-01-05T18:00:00+00:00", "open": 475.2, "high": 475.8, "low": 474.9, "close": 475.4, "volume": 190000, "incomplete": false },
+      { "timestamp": "2026-01-05T21:00:00+00:00", "open": 475.4, "high": 475.6, "low": 475.0, "close": 475.1, "volume": 8500, "incomplete": false }
     ]
   }
 }

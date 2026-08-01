@@ -20,6 +20,15 @@
       "justMyCode": false
     },
     {
+      "name": "Python: Run day-chart (CLI, 7-day range)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "day_chart.cli",
+      "args": ["${input:ticker}", "--start-date", "${input:startDate}"],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
       "name": "Python: Run Unit Tests",
       "type": "debugpy",
       "request": "launch",
@@ -53,6 +62,12 @@
       "type": "promptString",
       "description": "Stock ticker symbol",
       "default": "AAPL"
+    },
+    {
+      "id": "startDate",
+      "type": "promptString",
+      "description": "Range start date (YYYY-MM-DD) -- end defaults to today (or the last trading day if today is a weekend), giving a 7-day range with the default below",
+      "default": "2026-07-23"
     }
   ]
 }

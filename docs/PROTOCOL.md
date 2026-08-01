@@ -18,26 +18,43 @@ CLI signature and file format schemas for `quant-scratch`.
 
 ### `day-chart`
 
-- Usage: `day-chart TICKER [--date YYYY-MM-DD] [--debug]`
+- Usage: `day-chart TICKER [--date YYYY-MM-DD | --start-date YYYY-MM-DD --end-date YYYY-MM-DD] [--debug]`
 - Fetches full-day (pre-market + regular + after-market) 1-minute OHLCV bars for a single ticker
   (case-insensitive) from the [quant-data](https://github.com/croicu/quant-data) warehouse (not
-  live from yfinance — see `docs/ARCHITECTURE.md`), pops up an interactive matplotlib chart window,
-  and writes a CSV export to the current working directory. The popup stays open until you press
-  Enter in the terminal — that's a deliberate keypress gate, not `plt.show()`'s own blocking (which
-  doesn't reliably block under a debugger).
+  live from yfinance — see `docs/ARCHITECTURE.md`), pops up an interactive matplotlib chart window
+  (one day, or several days' charts stacked horizontally — see below), and writes a CSV export to
+  the current working directory. The command doesn't exit until you close the popup window; this is
+  driven by polling the GUI event loop for the window's own close event, not `plt.show()`'s own
+  blocking (which doesn't reliably block under a debugger).
 - Requires a `postgres` section in `settings.json` (see `docs/PROTOCOL.md`'s settings note below
   and quant-data's own `docs/DATABASE.md` for connecting to the box) — missing it is an `AppError`
   (exit `1`), same as any other fetch failure.
-- `--date YYYY-MM-DD`: session date to fetch. Omit to default to today, or the last trading day
-  (Friday) if today falls on a weekend. Rejected (exit `1`) if the date is malformed, in the
-  future, or falls on a weekend. NYSE holidays are not validated explicitly, and quant-data may
-  simply not have data loaded for the requested ticker/date yet — both surface as the same generic
-  "no data available" error.
+- `--date YYYY-MM-DD`: single session date to fetch. Omit (and omit `--start-date`/`--end-date`) to
+  default to today, or the last trading day (Friday) if today falls on a weekend. Rejected (exit
+  `1`) if the date is malformed, in the future, or falls on a weekend. NYSE holidays are not
+  validated explicitly, and quant-data may simply not have data loaded for the requested
+  ticker/date yet — both surface as the same generic "no data available" error. **Ignored if either
+  `--start-date` or `--end-date` is given.**
+- `--start-date YYYY-MM-DD` / `--end-date YYYY-MM-DD`: fetch every day in this inclusive range
+  instead of a single day — the popup shows one price/volume chart per day, stacked horizontally
+  (same 3:1 price:volume split per day, small padding between days). Giving either flag switches
+  the command into range mode (overriding `--date`); giving neither keeps today's single-day
+  behavior unchanged.
+  - Both given: fetches `start`..`end` inclusive. Rejected (exit `1`) if `start` is after `end`.
+  - `--start-date` alone: end defaults to today's single-day default (today, or the last trading
+    day if today is a weekend).
+  - `--end-date` alone: start defaults to the same day as `--end-date` (i.e. behaves like `--date`
+    with that value).
+  - Each bound is only checked for a valid, non-future date — unlike `--date`, a bound landing on a
+    weekend is not rejected outright, since a real range is expected to span weekends.
+  - Days within the range that come back with no data (weekends, holidays, not yet ingested) are
+    logged as a warning and dropped from the chart rather than failing the whole command. The
+    command only fails (exit `1`) if *every* day in the range has no data.
 - `--debug` overrides `settings.json`'s `debug` flag; on failure with debug on, the underlying
   `AppError` is re-raised instead of being caught and printed.
-- Exit codes: `0` success, `1` invalid ticker / invalid date / no data available / missing
-  `postgres` settings / connection error, `2` argument parsing error (argparse's default behavior
-  on missing/bad args).
+- Exit codes: `0` success, `1` invalid ticker / invalid date(s) / no data available (for any day, in
+  single-day mode; for every day, in range mode) / missing `postgres` settings / connection error,
+  `2` argument parsing error (argparse's default behavior on missing/bad args).
 - On success, prints the written CSV path to stdout (after you press Enter to close the popup).
 
 ### Settings: `postgres` section (`settings.json` / `settings.local.json`)
@@ -118,9 +135,11 @@ ticker symbol:
 `timestamp` isn't stored in the fixture — the mock generates it at fetch time, same as the real
 `YahooFinance` implementation.
 
-### Day-chart CSV (`<TICKER>_<DATE>_data.csv`)
+### Day-chart CSV (`<TICKER>_<DATE>_data.csv`, or `<TICKER>_<START>_<END>_data.csv` for a range)
 
-One header row followed by one data row per 1-minute bar:
+One header row followed by one data row per 1-minute bar. For a `--start-date`/`--end-date` range,
+every charted day's bars are concatenated into this single file, in chronological order (`timestamp`
+disambiguates which day a row belongs to; no separate `date` column is added):
 
 | Column | Type | Description |
 |---|---|---|
@@ -136,12 +155,17 @@ One header row followed by one data row per 1-minute bar:
 ### Day-chart popup window
 
 No longer written to disk — `day-chart` displays it as an interactive matplotlib window instead
-(`day_chart.chart.show_chart`, `TkAgg` backend, non-blocking `plt.show()` gated by an `input()`
-keypress prompt in the terminal). A figure with two vertically
-stacked subplots sharing an x-axis (rendered in US/Eastern time): price (line) on top, volume (bar)
-below. Each subplot shades its background by session (pre-market / regular / after-market) using
-`axvspan`. Doesn't currently render `incomplete` visually — that information is only in the
-CSV/`DayBar` data for now.
+(`day_chart.chart.show_chart`, `TkAgg` backend, non-blocking `plt.show()` gated by polling the GUI
+event loop until the window's own close event fires). One day: a figure with two vertically stacked subplots sharing an
+x-axis (rendered in US/Eastern time): price (line) on top (3/4 of the figure height), volume (bar)
+below (1/4). A `--start-date`/`--end-date` range: the same two-subplot layout repeated once per
+charted day, stacked horizontally left-to-right in chronological order with a small gap between
+days (each day keeping its own independent midnight-to-midnight x-axis — days are *not* a shared
+timeline), a shared ticker title above the whole figure, and each day's own date as that panel's
+title. Only the leftmost day's panels are y-axis labeled ("Price"/"Volume"), to avoid repeating
+labels across every panel. Each subplot shades its background by session (pre-market / regular /
+after-market) using `axvspan`. Doesn't currently render `incomplete` visually — that information is
+only in the CSV/`DayBar` data for now.
 
 ### Mock intraday bars fixture (`tests/data/quant_data_bars.json`)
 

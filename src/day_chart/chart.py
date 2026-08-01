@@ -22,50 +22,85 @@ _SESSION_COLORS = {
 _DEFAULT_SESSION_COLOR = "#ffffff"
 
 _INTERACTIVE_BACKEND = "TkAgg"
+_FIGURE_DPI = 100
+_DAY_PADDING_PX = 5
+_EVENT_LOOP_POLL_SECONDS = 0.1
+
+# One day's worth of chart input: its session date plus that day's bars.
+DayChartData = tuple[date, list[DayBar]]
 
 
-def show_chart(ticker: str, session_date: date, bars: list[DayBar]) -> None:
+def show_chart(ticker: str, days: list[DayChartData]) -> None:
     plt.switch_backend(_INTERACTIVE_BACKEND)
-    figure = render_chart(ticker, session_date, bars)
+    figure = render_chart(ticker, days)
+
+    closed = False
+
+    def _on_close(_event) -> None:
+        nonlocal closed
+        closed = True
+
+    figure.canvas.mpl_connect("close_event", _on_close)
+
+    # plt.show()'s own blocking mainloop doesn't reliably block when launched under the VS Code
+    # debugger (debugpy) -- the popup closed instantly. Polling the event loop ourselves via
+    # plt.pause() and a close_event callback works the same way regardless of that environment.
     plt.show(block=False)
-    input("Press Enter to close the chart...")
+    while not closed:
+        plt.pause(_EVENT_LOOP_POLL_SECONDS)
     plt.close(figure)
 
 
-def render_chart(ticker: str, session_date: date, bars: list[DayBar]) -> Figure:
-    if not bars:
-        raise AppError(f"Cannot render chart for '{ticker}': no bars provided.")
+def render_chart(ticker: str, days: list[DayChartData]) -> Figure:
+    if not days:
+        raise AppError(f"Cannot render chart for '{ticker}': no days provided.")
 
-    timestamps_et: list[datetime] = []
-    closes: list[float] = []
-    volumes: list[int] = []
-    sessions: list[str] = []
-    for bar in bars:
-        timestamps_et.append(bar.timestamp.astimezone(EASTERN))
-        closes.append(bar.close)
-        volumes.append(bar.volume)
-        sessions.append(bar.session)
+    figure, axes = plt.subplots(
+        2,
+        len(days),
+        sharex="col",
+        squeeze=False,
+        figsize=(max(12, 5 * len(days)), 8),
+        dpi=_FIGURE_DPI,
+        gridspec_kw={"height_ratios": [3, 1]},
+        layout="constrained",
+    )
+    figure.get_layout_engine().set(w_pad=_DAY_PADDING_PX / _FIGURE_DPI, wspace=0)
+    figure.suptitle(ticker)
 
-    figure, (price_axis, volume_axis) = plt.subplots(2, 1, sharex=True, figsize=(12, 8), gridspec_kw={"height_ratios": [3, 1]})
+    for column_index, (session_date, bars) in enumerate(days):
+        price_axis = axes[0, column_index]
+        volume_axis = axes[1, column_index]
 
-    price_axis.plot(timestamps_et, closes, color="#1f2937", linewidth=1)
-    price_axis.set_ylabel("Price")
-    price_axis.set_title(f"{ticker} — {session_date.isoformat()}")
+        timestamps_et: list[datetime] = []
+        closes: list[float] = []
+        volumes: list[int] = []
+        sessions: list[str] = []
+        for bar in bars:
+            timestamps_et.append(bar.timestamp.astimezone(EASTERN))
+            closes.append(bar.close)
+            volumes.append(bar.volume)
+            sessions.append(bar.session)
 
-    volume_axis.bar(timestamps_et, volumes, color="#1f2937", width=1 / (24 * 60))
-    volume_axis.set_ylabel("Volume")
-    volume_axis.set_xlabel("Time (ET)")
+        price_axis.plot(timestamps_et, closes, color="#1f2937", linewidth=1)
+        price_axis.set_title(session_date.isoformat())
 
-    _shade_sessions(price_axis, timestamps_et, sessions)
-    _shade_sessions(volume_axis, timestamps_et, sessions)
+        volume_axis.bar(timestamps_et, volumes, color="#1f2937", width=1 / (24 * 60))
+        volume_axis.set_xlabel("Time (ET)")
 
-    session_start = datetime.combine(session_date, time.min, tzinfo=EASTERN)
-    session_end = session_start + timedelta(days=1)
-    volume_axis.set_xlim(session_start, session_end)
+        if column_index == 0:
+            price_axis.set_ylabel("Price")
+            volume_axis.set_ylabel("Volume")
 
-    volume_axis.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M", tz=EASTERN))
+        _shade_sessions(price_axis, timestamps_et, sessions)
+        _shade_sessions(volume_axis, timestamps_et, sessions)
+
+        session_start = datetime.combine(session_date, time.min, tzinfo=EASTERN)
+        session_end = session_start + timedelta(days=1)
+        volume_axis.set_xlim(session_start, session_end)
+        volume_axis.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M", tz=EASTERN))
+
     figure.autofmt_xdate()
-    figure.tight_layout()
     return figure
 
 

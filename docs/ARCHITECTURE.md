@@ -121,39 +121,68 @@ directly — that's confined to `shared/providers/yahoo_finance.py`.
 
 ### `day_chart` — second experiment CLI
 
-Fetches full-day intraday bars for a single stock ticker and generates a price/volume chart plus a
-CSV export. Depends on `defs` for the `IntraDayProvider` interface and `DayBar` data type, and on
-`shared` for the default `QuantDataIntraDay` implementation plus `Settings`/`Logger`/`AppError`. No
-dependency on `quant_data` or `matplotlib.pyplot` outside its own `chart.py`/`shared/providers/` —
-bar fetching is confined to `shared/providers/quant_data.py`.
+Fetches full-day intraday bars for one or more days for a single stock ticker and generates a
+price/volume chart plus a CSV export. Depends on `defs` for the `IntraDayProvider` interface and
+`DayBar` data type, and on `shared` for the default `QuantDataIntraDay` implementation plus
+`Settings`/`Logger`/`AppError`. No dependency on `quant_data` or `matplotlib.pyplot` outside its own
+`chart.py`/`shared/providers/` — bar fetching is confined to `shared/providers/quant_data.py`.
 
 - `output.py` — `bars_to_csv(bars) -> str`; columns include `incomplete`
-- `chart.py` — `render_chart(ticker, session_date, bars) -> Figure`; pure figure construction, two
-  vertically stacked subplots (price line on top, volume bars below), x-axis converted to
-  US/Eastern for display (storage/CSV stay UTC), each subplot shaded by session via `axvspan`.
-  Raises `AppError` for an empty `bars` list. Runs under the `Agg` backend (module default) so it's
-  headless-safe in tests/CI. Doesn't currently do anything visually distinct for `incomplete` bars
-  — carried through the data only for now. `show_chart(ticker, session_date, bars)` is the
-  interactive entry point: switches to the `TkAgg` backend, calls `render_chart`, shows the figure
-  non-blocking (`plt.show(block=False)`), then blocks on an `input()` prompt in the terminal before
-  closing the figure. Uses the keypress gate rather than relying on `plt.show()`'s own blocking
-  mainloop — that didn't reliably block when launched under the VS Code debugger (debugpy), closing
-  the popup instantly. Kept separate from `render_chart` specifically so unit tests can exercise
-  figure construction without ever touching a GUI backend.
+- `chart.py` — `DayChartData = tuple[date, list[DayBar]]` (one day's session date + its bars).
+  `render_chart(ticker, days: list[DayChartData]) -> Figure`; pure figure construction, a 2×N grid
+  (N = `len(days)`) built via a single `plt.subplots(2, N, sharex="col", squeeze=False,
+  dpi=100, gridspec_kw={"height_ratios": [3, 1]}, layout="constrained")` — `sharex="col"` links each
+  day's own price/volume pair without linking across days (each day gets its own
+  midnight-to-midnight x-axis, since the calendar dates differ), `height_ratios` keeps every day's
+  own price:volume split at 3:1, and `layout="constrained"` (rather than `tight_layout()`) avoids a
+  `tight_layout`/shared-axes incompatibility warning while still leaving room for
+  `figure.suptitle(ticker)` above the whole grid. The small horizontal padding between day panels is
+  set explicitly in pixels rather than gridspec's relative `wspace`: `dpi` is pinned to `100` so
+  pixels convert predictably to inches, then `figure.get_layout_engine().set(w_pad=5/100, wspace=0)`
+  fixes the day-to-day gap at 5px regardless of figure width/day count (leaving `h_pad`/`hspace` —
+  the price-to-volume gap within a day — at their constrained-layout defaults, untouched). Each day
+  panel gets its own date as a subplot title; only the leftmost column labels its
+  y-axes ("Price"/"Volume"), to avoid repeating them across every panel. Each subplot still shades
+  by session via `axvspan`. Raises `AppError` for an empty `days` list. Runs under the `Agg` backend
+  (module default) so it's headless-safe in tests/CI. Doesn't currently do anything visually
+  distinct for `incomplete` bars — carried through the data only for now. `show_chart(ticker, days)`
+  is the interactive entry point: switches to the `TkAgg` backend, calls `render_chart`, shows the
+  figure non-blocking (`plt.show(block=False)`), registers a `close_event` callback on
+  `figure.canvas` that flips a flag, then polls the GUI event loop itself
+  (`while not closed: plt.pause(0.1)`) until that flag flips — i.e. until the user actually closes
+  the popup window — before returning. Doesn't rely on `plt.show()`'s own blocking mainloop — that
+  didn't reliably block when launched under the VS Code debugger (debugpy), closing the popup
+  instantly; polling the event loop directly works the same way regardless of that environment.
+  Kept separate from `render_chart` specifically so unit tests can
+  exercise figure construction without ever touching a GUI backend.
 - `cli.py` — `day-chart` entry point; `main()` takes optional `provider: IntraDayProvider`,
-  `settings_path: Path`, `output_dir: Path`, and `show_chart: ShowChartFn` parameters — same
-  parameter-based DI pattern as `stock_quote.cli` (tests inject a non-GUI stand-in for
-  `show_chart`, same reason `provider` is injected instead of hitting a real database). Unlike
-  `stock_quote`, the default provider can't be constructed before settings are loaded (it needs
-  `Settings.postgres` for connection details), so provider construction happens *after*
-  `Settings.load()` succeeds: `QuantDataIntraDay(host=settings.postgres.host, ...)` if no
-  `provider` was injected, raising `AppError` if `settings.postgres` is absent. `output_dir` has no
-  CLI flag (`--output-dir` was deliberately deferred); it exists purely as a test seam, the same
-  role `settings_path` plays — it now only affects where the CSV lands, since the chart itself is
-  shown in a popup rather than saved. Also owns `resolve_session_date(date_argument, today)` —
-  resolves the `--date` argument to a concrete session date, defaulting to today or rolling back to
-  the prior Friday if today is a weekend, and raising `AppError` for a malformed, future, or
-  weekend date.
+  `settings_path: Path`, `output_dir: Path`, and `show_chart: ShowChartFn` (`Callable[[str,
+  list[DayChartData]], None]`) parameters — same parameter-based DI pattern as `stock_quote.cli`
+  (tests inject a non-GUI stand-in for `show_chart`, same reason `provider` is injected instead of
+  hitting a real database). Unlike `stock_quote`, the default provider can't be constructed before
+  settings are loaded (it needs `Settings.postgres` for connection details), so provider
+  construction happens *after* `Settings.load()` succeeds: `QuantDataIntraDay(host=settings.postgres.host,
+  ...)` if no `provider` was injected, raising `AppError` if `settings.postgres` is absent.
+  `output_dir` has no CLI flag (`--output-dir` was deliberately deferred); it exists purely as a
+  test seam, the same role `settings_path` plays — it now only affects where the CSV lands, since
+  the chart itself is shown in a popup rather than saved. Owns `resolve_session_date(date_argument,
+  today)` — resolves the `--date` argument to a concrete session date, defaulting to today or
+  rolling back to the prior Friday if today is a weekend, and raising `AppError` for a malformed,
+  future, or weekend date — used when neither `--start-date` nor `--end-date` is given. Also owns
+  `resolve_date_range(start_date_argument, end_date_argument, today)` — used instead of
+  `resolve_session_date` whenever either range flag is given (`--date` is ignored in that case):
+  `--end-date` alone defaults its start to the same day (so `--end-date X` alone behaves like
+  `--date X`); `--start-date` alone defaults its end to today's `resolve_session_date`-style default;
+  both given must satisfy `start <= end` (`AppError` otherwise). Individual range bounds are only
+  format/future-validated, *not* weekend-rejected like `resolve_session_date` — a range legitimately
+  spans weekends, which `main()` then skips. For each resolved day, `main()` calls
+  `provider.fetch_bars` individually; in range mode (2+ days), a per-day `AppError` (weekend,
+  holiday, not-yet-ingested) is caught, logged via `Logger.warning` (category `date_range`), and
+  that day is dropped from the chart rather than failing the whole command — only if *every* day in
+  the range comes back empty does the command fail. In single-day mode, a fetch failure still
+  propagates directly as before (unchanged). The CSV export flattens all charted days' bars into one
+  file — `<TICKER>_<DATE>_data.csv` for a single day, `<TICKER>_<START>_<END>_data.csv` (the
+  requested range's bounds, not just the days that actually had data) for a range.
 
 ### Test doubles (`tests/`)
 
@@ -183,13 +212,17 @@ bar fetching is confined to `shared/providers/quant_data.py`.
 a `yfinance` network call; test: `tests.mocks.yahoo_finance.MockYahooFinance`, a fixture lookup) →
 `StockQuote` → `output.quote_to_csv` → stdout.
 
-`day-chart TICKER [--date ...]` → `cli.resolve_session_date` → injected
-`IntraDayProvider.fetch_bars` (real: `shared.providers.quant_data.QuantDataIntraDay`, wrapping a
-`quant_data.MarketData` read against the Postgres warehouse, tagging each bar via
-`shared.sessions.infer_session`; test: `tests.mocks.quant_data.MockQuantDataIntraDay`, a
-fixture lookup) → `list[DayBar]` → both injected `show_chart` (real: `chart.show_chart`, a blocking
-popup window; test: a non-GUI stand-in) and `output.bars_to_csv` (→ `<TICKER>_<DATE>_data.csv`,
-written to `output_dir`, CWD by default).
+`day-chart TICKER [--date ... | --start-date ... --end-date ...]` → `cli.resolve_session_date`
+(single day) or `cli.resolve_date_range` (either range flag given) → one `list[date]` → per-date
+injected `IntraDayProvider.fetch_bars` (real: `shared.providers.quant_data.QuantDataIntraDay`,
+wrapping a `quant_data.MarketData` read against the Postgres warehouse, tagging each bar via
+`shared.sessions.infer_session`; test: `tests.mocks.quant_data.MockQuantDataIntraDay`, a fixture
+lookup) — in range mode, a per-day `AppError` is logged as a warning and that day dropped rather
+than failing the whole command — → `list[DayChartData]` (`(date, list[DayBar])` per charted day) →
+both injected `show_chart` (real: `chart.show_chart`, a blocking popup window; test: a non-GUI
+stand-in) and, after flattening every charted day's bars into one list, `output.bars_to_csv` (→
+`<TICKER>_<DATE>_data.csv` for a single day, `<TICKER>_<START>_<END>_data.csv` for a range; written
+to `output_dir`, CWD by default).
 
 ## Contracts
 

@@ -8,29 +8,33 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from defs.contracts import IntraDayProvider
-from defs.protocols import DayBar
 from shared.diagnostics import ConsoleLogSink, Logger
 from shared.errors import AppError
 from shared.providers.quant_data import QuantDataIntraDay
 from shared.settings import Settings
 
 from . import chart
+from .chart import DayChartData
 from .output import bars_to_csv
 
-ShowChartFn = Callable[[str, date, list[DayBar]], None]
+CATEGORY_DATE_RANGE = "date_range"
+
+ShowChartFn = Callable[[str, list[DayChartData]], None]
 
 
 @dataclass
 class CliArguments:
     ticker: str
     date: str | None = None
+    start_date: str | None = None
+    end_date: str | None = None
     debug: bool = False
 
 
 def parse_args(argv: list[str]) -> CliArguments:
     parser = argparse.ArgumentParser(
         prog="day-chart",
-        usage="day-chart TICKER [--date YYYY-MM-DD] [--debug]",
+        usage="day-chart TICKER [--date YYYY-MM-DD | --start-date YYYY-MM-DD --end-date YYYY-MM-DD] [--debug]",
         description="Fetch full-day intraday bars for a stock ticker, pop up a price/volume chart, and export a CSV.",
     )
 
@@ -38,7 +42,17 @@ def parse_args(argv: list[str]) -> CliArguments:
     parser.add_argument(
         "--date",
         default=None,
-        help="session date as YYYY-MM-DD; defaults to today (or the last trading day if today is a weekend)",
+        help="session date as YYYY-MM-DD; defaults to today (or the last trading day if today is a weekend). Ignored if --start-date or --end-date is given.",
+    )
+    parser.add_argument(
+        "--start-date",
+        default=None,
+        help="start of a date range as YYYY-MM-DD; overrides --date. Defaults to --end-date if omitted.",
+    )
+    parser.add_argument(
+        "--end-date",
+        default=None,
+        help="end of a date range as YYYY-MM-DD; overrides --date. Defaults to today (or the last trading day if today is a weekend) if omitted.",
     )
     parser.add_argument(
         "--debug",
@@ -49,7 +63,25 @@ def parse_args(argv: list[str]) -> CliArguments:
 
     args = parser.parse_args(argv)
 
-    return CliArguments(ticker=args.ticker, date=args.date, debug=args.debug)
+    return CliArguments(
+        ticker=args.ticker,
+        date=args.date,
+        start_date=args.start_date,
+        end_date=args.end_date,
+        debug=args.debug,
+    )
+
+
+def _parse_and_validate_date(date_argument: str, current_date: date) -> date:
+    try:
+        parsed_date = date.fromisoformat(date_argument)
+    except ValueError as error:
+        raise AppError(f"Invalid date: '{date_argument}' is not a valid YYYY-MM-DD date.") from error
+
+    if parsed_date > current_date:
+        raise AppError(f"Invalid date: '{parsed_date.isoformat()}' is in the future.")
+
+    return parsed_date
 
 
 def resolve_session_date(date_argument: str | None, today: date | None = None) -> date:
@@ -58,17 +90,40 @@ def resolve_session_date(date_argument: str | None, today: date | None = None) -
     if date_argument is None:
         return _last_trading_day(current_date)
 
-    try:
-        parsed_date = date.fromisoformat(date_argument)
-    except ValueError as error:
-        raise AppError(f"Invalid date: '{date_argument}' is not a valid YYYY-MM-DD date.") from error
-
-    if parsed_date > current_date:
-        raise AppError(f"Invalid date: '{parsed_date.isoformat()}' is in the future.")
+    parsed_date = _parse_and_validate_date(date_argument, current_date)
     if parsed_date.weekday() >= 5:
         raise AppError(f"Invalid date: '{parsed_date.isoformat()}' falls on a weekend.")
 
     return parsed_date
+
+
+def resolve_date_range(
+    start_date_argument: str | None,
+    end_date_argument: str | None,
+    today: date | None = None,
+) -> list[date]:
+    current_date = date.today() if today is None else today
+
+    if end_date_argument is None:
+        parsed_end = _last_trading_day(current_date)
+    else:
+        parsed_end = _parse_and_validate_date(end_date_argument, current_date)
+
+    if start_date_argument is None:
+        parsed_start = parsed_end
+    else:
+        parsed_start = _parse_and_validate_date(start_date_argument, current_date)
+
+    if parsed_start > parsed_end:
+        raise AppError(f"Invalid range: start date '{parsed_start.isoformat()}' is after end date '{parsed_end.isoformat()}'.")
+
+    session_dates: list[date] = []
+    current = parsed_start
+    while current <= parsed_end:
+        session_dates.append(current)
+        current += timedelta(days=1)
+
+    return session_dates
 
 
 def _last_trading_day(current_date: date) -> date:
@@ -123,13 +178,37 @@ def main(
 
     try:
         normalized_ticker = arguments.ticker.upper()
-        session_date = resolve_session_date(arguments.date)
-        bars = active_provider.fetch_bars(normalized_ticker, session_date)
+        is_range_mode = arguments.start_date is not None or arguments.end_date is not None
 
-        csv_path = active_output_dir / f"{normalized_ticker}_{session_date.isoformat()}_data.csv"
+        if is_range_mode:
+            session_dates = resolve_date_range(arguments.start_date, arguments.end_date)
 
-        active_show_chart(normalized_ticker, session_date, bars)
-        csv_path.write_text(bars_to_csv(bars), encoding="utf-8", newline="")
+            days: list[DayChartData] = []
+            for session_date in session_dates:
+                try:
+                    bars = active_provider.fetch_bars(normalized_ticker, session_date)
+                except AppError as error:
+                    Logger.warning(f"day-chart: skipping {session_date.isoformat()}: {error}", category=CATEGORY_DATE_RANGE)
+                    continue
+                days.append((session_date, bars))
+
+            if not days:
+                raise AppError(f"No data available for '{normalized_ticker}' between {session_dates[0].isoformat()} and {session_dates[-1].isoformat()}.")
+
+            csv_path = active_output_dir / f"{normalized_ticker}_{session_dates[0].isoformat()}_{session_dates[-1].isoformat()}_data.csv"
+        else:
+            session_date = resolve_session_date(arguments.date)
+            bars = active_provider.fetch_bars(normalized_ticker, session_date)
+            days = [(session_date, bars)]
+
+            csv_path = active_output_dir / f"{normalized_ticker}_{session_date.isoformat()}_data.csv"
+
+        all_bars = []
+        for _, day_bars in days:
+            all_bars.extend(day_bars)
+
+        active_show_chart(normalized_ticker, days)
+        csv_path.write_text(bars_to_csv(all_bars), encoding="utf-8", newline="")
 
         print(f"day-chart: wrote {csv_path}")
         return 0

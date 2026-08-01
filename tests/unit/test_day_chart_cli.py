@@ -50,6 +50,47 @@ def test_resolve_session_date_rejects_weekend_date():
         cli.resolve_session_date("2026-01-03", today=date(2026, 1, 5))  # Saturday
 
 
+def test_resolve_date_range_with_both_bounds_is_inclusive():
+    resolved = cli.resolve_date_range("2026-01-02", "2026-01-05", today=date(2026, 1, 10))
+
+    assert resolved == [date(2026, 1, 2), date(2026, 1, 3), date(2026, 1, 4), date(2026, 1, 5)]
+
+
+def test_resolve_date_range_start_only_defaults_end_to_last_trading_day():
+    resolved = cli.resolve_date_range("2026-01-02", None, today=date(2026, 1, 4))  # Sunday
+
+    assert resolved == [date(2026, 1, 2)]  # last trading day for Sunday is Friday 01-02
+
+
+def test_resolve_date_range_end_only_defaults_start_to_same_day():
+    resolved = cli.resolve_date_range(None, "2026-01-05", today=date(2026, 1, 10))
+
+    assert resolved == [date(2026, 1, 5)]
+
+
+def test_resolve_date_range_rejects_start_after_end():
+    with pytest.raises(cli.AppError):
+        cli.resolve_date_range("2026-01-05", "2026-01-02", today=date(2026, 1, 10))
+
+
+def test_resolve_date_range_rejects_malformed_bound():
+    with pytest.raises(cli.AppError):
+        cli.resolve_date_range("not-a-date", "2026-01-05", today=date(2026, 1, 10))
+
+
+def test_resolve_date_range_rejects_future_bound():
+    with pytest.raises(cli.AppError):
+        cli.resolve_date_range("2026-01-02", "2026-01-20", today=date(2026, 1, 10))
+
+
+def test_resolve_date_range_allows_weekend_bounds():
+    # Individual range bounds may land on a weekend -- the caller skips no-data days rather than
+    # rejecting the bound outright, unlike resolve_session_date's single-day strictness.
+    resolved = cli.resolve_date_range("2026-01-03", "2026-01-03", today=date(2026, 1, 10))  # Saturday
+
+    assert resolved == [date(2026, 1, 3)]
+
+
 def test_main_shows_chart_and_writes_csv_and_returns_zero(tmp_path, capsys):
     shown_calls = []
 
@@ -58,7 +99,7 @@ def test_main_shows_chart_and_writes_csv_and_returns_zero(tmp_path, capsys):
         provider=MockQuantDataIntraDay(),
         settings_path=SETTINGS_PATH,
         output_dir=tmp_path,
-        show_chart=lambda ticker, session_date, bars: shown_calls.append((ticker, session_date, bars)),
+        show_chart=lambda ticker, days: shown_calls.append((ticker, days)),
     )
 
     captured = capsys.readouterr()
@@ -69,7 +110,8 @@ def test_main_shows_chart_and_writes_csv_and_returns_zero(tmp_path, capsys):
     assert str(csv_path) in captured.out
     assert len(shown_calls) == 1
     assert shown_calls[0][0] == "SPY"
-    assert shown_calls[0][1] == date(2026, 1, 2)
+    assert len(shown_calls[0][1]) == 1
+    assert shown_calls[0][1][0][0] == date(2026, 1, 2)
 
 
 def test_main_returns_one_on_no_data(tmp_path, capsys):
@@ -102,3 +144,56 @@ def test_main_returns_one_when_postgres_settings_missing(tmp_path, capsys):
     captured = capsys.readouterr()
     assert exit_code == 1
     assert "postgres" in captured.err
+
+
+def test_main_range_mode_skips_weekend_and_writes_combined_csv(tmp_path):
+    # Fixture has SPY data for 2026-01-02 (Fri) and 2026-01-05 (Mon) only; the weekend in between
+    # (03/04) has no fixture entry, so it should be skipped with a warning rather than failing.
+    shown_calls = []
+
+    exit_code = cli.main(
+        ["spy", "--start-date", "2026-01-02", "--end-date", "2026-01-05"],
+        provider=MockQuantDataIntraDay(),
+        settings_path=SETTINGS_PATH,
+        output_dir=tmp_path,
+        show_chart=lambda ticker, days: shown_calls.append((ticker, days)),
+    )
+
+    csv_path = tmp_path / "SPY_2026-01-02_2026-01-05_data.csv"
+
+    assert exit_code == 0
+    assert csv_path.exists()
+    assert len(shown_calls) == 1
+    charted_dates = []
+    for session_date, _ in shown_calls[0][1]:
+        charted_dates.append(session_date)
+    assert charted_dates == [date(2026, 1, 2), date(2026, 1, 5)]
+
+
+def test_main_range_mode_ignores_date_argument(tmp_path):
+    shown_calls = []
+
+    exit_code = cli.main(
+        ["spy", "--date", "2026-01-02", "--start-date", "2026-01-05", "--end-date", "2026-01-05"],
+        provider=MockQuantDataIntraDay(),
+        settings_path=SETTINGS_PATH,
+        output_dir=tmp_path,
+        show_chart=lambda ticker, days: shown_calls.append((ticker, days)),
+    )
+
+    assert exit_code == 0
+    assert len(shown_calls[0][1]) == 1
+    assert shown_calls[0][1][0][0] == date(2026, 1, 5)
+
+
+def test_main_range_mode_returns_one_when_every_day_has_no_data(tmp_path, capsys):
+    exit_code = cli.main(
+        ["NOTINFIXTURE", "--start-date", "2026-01-02", "--end-date", "2026-01-05"],
+        provider=MockQuantDataIntraDay(),
+        settings_path=SETTINGS_PATH,
+        output_dir=tmp_path,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "error" in captured.err
