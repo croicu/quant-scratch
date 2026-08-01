@@ -150,6 +150,38 @@ and has no CLI/console script of its own.
     directly was pure duplication once the warehouse existed. Constructor accepts an injected
     `client` for tests, matching this repo's DI-over-monkeypatching convention for testing
     dependencies on third-party/cross-repo code.
+  - `ibkr.py` -- `IBKRIntraDay`, another `defs.contracts.IntraDayProvider` implementation, wrapping
+    [`ib_async`](https://github.com/ib-api-reloaded/ib_async) (the actively-maintained community
+    fork of the archived `ib_insync`) against a local IB Gateway/TWS instance. Built for
+    `tasks/ibkr_fetch_historical_spy.md` to validate the IBKR historical-bars pipeline as a
+    from-source alternative to `QuantDataIntraDay` -- quant-data's own ingest still pulls from
+    Yahoo Finance and inherits its extended-hours zero-volume gap (see `quant_data.py`'s note
+    above); IBKR's `reqHistoricalData` returns real trade volume for pre-/after-market bars too
+    (confirmed against live SPY data -- see the task file's Test results). Connects and
+    disconnects a fresh `IB()` per `fetch_bars` call rather than holding a connection open
+    (`client_factory: Callable[[], IB]`, defaulting to `IB` itself, overridable for tests) -- no
+    performance case for a shared connection when each CLI invocation calls `fetch_bars` once.
+    Requests `barSizeSetting="1 min"`, `whatToShow="TRADES"`, `useRTH=False`, `durationStr="1 D"`
+    ending at that session date's 20:00 ET after-market close, `formatDate=2` so returned bar
+    timestamps come back timezone-aware UTC directly (no local-timezone ambiguity to normalize,
+    unlike `QuantDataIntraDay`'s naive-timestamp handling). Reuses `shared.sessions.infer_session`
+    for `DayBar.session`, same as `QuantDataIntraDay`; always sets `incomplete=False` since IBKR's
+    `BarData` carries no such flag (unlike quant-data's `OHLCV.incomplete`) and a zero-volume
+    1-minute bar here is presumed to mean "genuinely no trades that minute," not missing data.
+    Defaults to `host="127.0.0.1"`, `port=4002` (IB Gateway's paper-trading API port -- this repo's
+    Gateway instance runs paper, not live), `client_id=1`. Not yet wired into `day-chart`'s
+    provider selection (`QuantDataIntraDay` is still the only default) -- see the task file's open
+    items.
+
+### `ibkr_fetch` -- manual pipeline-validation script (not a registered CLI)
+
+`validate.py`'s `main(argv)`: fetches one ticker/date via `IBKRIntraDay`, prints a spot-check
+summary (bar count, first/last timestamp, per-session bar and zero-volume counts), and writes a
+CSV via `day_chart.output.bars_to_csv` (reused as-is -- same schema, no new format). Deliberately
+has no `argparse`, no `pyproject.toml` entry point, and no test coverage of its own (`IBKRIntraDay`
+itself is unit-tested; this script is just a thin manual harness around it) -- run directly with
+`python -m ibkr_fetch.validate [TICKER] [YYYY-MM-DD]` against a running Gateway/TWS instance.
+Defaults to `SPY`/`2026-07-31`, the task's original validation scope.
 
 ### `stock_quote` — first experiment CLI
 
@@ -331,6 +363,8 @@ conforms to, independent of which one is wired in.
 - `defs.protocols.DayBar` — pure data, no behavior; the CSV formatting in `day_chart/output.py` and
   the chart rendering in `day_chart/chart.py` both operate on it rather than living on the
   dataclass itself.
-- `defs.contracts.IntraDayProvider` — behavioral interface implemented by both
-  `shared.providers.quant_data.QuantDataIntraDay` (production) and
+- `defs.contracts.IntraDayProvider` — behavioral interface implemented by
+  `shared.providers.quant_data.QuantDataIntraDay` (production, wired into `day-chart`),
+  `shared.providers.ibkr.IBKRIntraDay` (a second implementation, validated standalone via
+  `ibkr_fetch.validate` but not yet wired into `day-chart`'s provider selection), and
   `tests.mocks.quant_data.MockQuantDataIntraDay` (tests).
