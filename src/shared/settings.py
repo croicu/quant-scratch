@@ -24,12 +24,19 @@ class PostgresSettings:
 
 
 @dataclass
+class WindowSettings:
+    x: int
+    y: int
+
+
+@dataclass
 class Settings:
     debug: bool
     logging: TelemetryLevel = TelemetryLevel.ERROR
     log_categories: list[str] = field(default_factory=list)
     excluded_categories: list[str] = field(default_factory=list)
     postgres: PostgresSettings | None = None
+    window: WindowSettings | None = None
 
     _instance: ClassVar[Settings | None] = None
 
@@ -129,15 +136,51 @@ class Settings:
                 ssh_key_path=None if ssh_key_path is None else str(ssh_key_path),
             )
 
+        window_settings: WindowSettings | None = None
+        window_payload = settings_payload.get("window")
+        if window_payload is not None:
+            if not isinstance(window_payload, dict):
+                raise TaskError("'settings.window' must be a JSON object.")
+            missing_keys = []
+            for key in ["x", "y"]:
+                if key not in window_payload:
+                    missing_keys.append(key)
+            if missing_keys:
+                raise TaskError(f"'settings.window' is missing required key(s): {', '.join(missing_keys)}")
+            window_settings = WindowSettings(x=int(window_payload["x"]), y=int(window_payload["y"]))
+
         cls._instance = cls(
             debug=debug,
             logging=log_level,
             log_categories=log_categories,
             excluded_categories=excluded_categories,
             postgres=postgres_settings,
+            window=window_settings,
         )
 
         return cls._instance
+
+    @classmethod
+    def save_window_position(cls, x: int, y: int, local_path: Path = Path(_LOCAL_FILENAME)) -> None:
+        # A hint, not a hard requirement -- read back via the same best-effort 'window' section
+        # Settings.load() already parses. Merges into local_path rather than overwriting it
+        # wholesale, so this never clobbers unrelated local overrides (e.g. postgres.sshKeyPath).
+        payload: dict = {}
+        if local_path.exists():
+            with local_path.open("r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                payload = loaded
+
+        settings_section = payload.get("settings")
+        if not isinstance(settings_section, dict):
+            settings_section = {}
+        settings_section["window"] = {"x": x, "y": y}
+        payload["settings"] = settings_section
+
+        with local_path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+            f.write("\n")
 
     @classmethod
     def current(cls) -> Settings:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import date, datetime, timezone
 
 from quant_data import MarketData, create_postgres_provider
@@ -44,6 +45,7 @@ class QuantDataIntraDay:
         if host is None or port is None or dbname is None:
             raise AppError("QuantDataIntraDay requires host/port/dbname (or an injected client).")
 
+        connect_start = time.perf_counter()
         try:
             provider = create_postgres_provider(
                 host=host,
@@ -53,15 +55,25 @@ class QuantDataIntraDay:
                 password=password,
                 ssh_user=ssh_user,
                 ssh_key_path=ssh_key_path,
+                # Injects our own Logger (structurally satisfies quant_data.protocols.LoggingSink
+                # -- same info/warning/error/fatal/perf(description, elapsed_seconds) shape) so
+                # quant-data's own internal timing/connection markers land in the same stream as
+                # ours instead of its private, invisible-to-us default. See quant-data#20.
+                logger=Logger,
             )
-            self._client = MarketData(provider)
+            self._client = MarketData(provider, logger=Logger)
         except Exception as error:
             raise AppError(f"Failed to connect to quant-data at {host}:{port}/{dbname}: {error}") from error
+
+        Logger.perf(f"connected to quant-data at {host}:{port}/{dbname}", time.perf_counter() - connect_start)
 
     def fetch_bars(self, ticker: str, target_date: date) -> list[DayBar]:
         normalized_ticker = ticker.upper()
 
         try:
+            # No perf wrapper here: quant-data's own PostgresDatabase.fetch_bars now emits its own
+            # duration marker for this identical call, via the injected logger above (quant-data#20)
+            # -- a second one here would just duplicate it under a different description.
             ohlcv_bars = self._client.fetch_bars(normalized_ticker, target_date, target_date)
         except Exception as error:
             raise AppError(f"Failed to fetch bars for '{normalized_ticker}' on {target_date.isoformat()} from quant-data: {error}") from error

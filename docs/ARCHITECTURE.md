@@ -32,7 +32,38 @@ rather than something provider-specific.
 Every experiment package depends on this one for bootstrap; it owns no experiment-specific logic
 and has no CLI/console script of its own.
 
-- `diagnostics.py` — `Logger`, log sinks (`ConsoleLogSink`), telemetry levels/records
+- `diagnostics.py` — `Logger`, log sinks (`ConsoleLogSink`), telemetry levels/records. Defines
+  `CATEGORY_GENERAL` (the default), `CATEGORY_PERF` ("perf"), and `CATEGORY_PERF_UI` ("perf_ui") —
+  the latter two centralized here (rather than as a per-file constant like `quant_data.py`'s
+  `CATEGORY_INTRADAY_FETCH` or `day_chart/cli.py`'s `CATEGORY_DATE_RANGE`) specifically so timing
+  markers scattered across multiple packages can be toggled together with one `settings.json`
+  `logCategories` entry (plus a `logLevel` of `"info"` or lower, since `Logger.info` is filtered by
+  level too) rather than one category per module. `CATEGORY_PERF_UI` is split out from
+  `CATEGORY_PERF` specifically because it's much higher-volume (one line per ~100ms event-loop poll
+  while a popup is open) and only useful when actively diagnosing UI responsiveness (resize
+  lag, redraw cost) — a flat sibling category for now, not a true hierarchical `perf/ui`
+  subcategory, since `logCategories` has no hierarchy today. `Logger.perf(description,
+  elapsed_seconds, category=CATEGORY_PERF)` is the call site for these — a thin wrapper over
+  `Logger.info(f"duration: {elapsed_seconds:.3f}s - {description}", category)`, duration-first so
+  markers are scannable without reading past the message (`day_chart.chart`'s `perf_counter()`-timed
+  markers use it for backend-switch/render/popup-wait duration under `perf`, plus per-poll timing,
+  actual `canvas.draw()` duration, and `resize_event` markers under `perf_ui`;
+  `shared.providers.quant_data` for connection/query duration under `perf`; `day_chart.cli` for the
+  cli-entry-to-settings-loaded/fetch-phase/CSV-write markers under `perf`). `day_chart.cli.main()`
+  installs the
+  `ConsoleLogSink` immediately after `Settings.load()` succeeds and before constructing
+  `QuantDataIntraDay` specifically so that provider's own connection-time marker isn't silently
+  swallowed by the default no-op sink that's active before `Logger.set_logger()` runs (which is
+  exactly what happened before this ordering fix — the SSH tunnel/DB connection cost was being
+  measured but never printed). `Logger` (the class itself, passed uninstantiated — all its public
+  methods are `@staticmethod`s) is also injected into quant-data as `logger=Logger` wherever it
+  accepts one (`create_postgres_provider`, `MarketData`) — it structurally satisfies quant-data's
+  public `quant_data.protocols.LoggingSink` `Protocol` with no adapter code needed, since that
+  Protocol was deliberately shaped to mirror this `Logger`'s own method surface
+  ([quant-data#20](https://github.com/croicu/quant-data/issues/20)). This is what makes
+  `shared.providers.quant_data`'s own perf markers and quant-data's *internal* ones (tunnel
+  setup, `psycopg.connect()`, each query) show up interleaved in the same stream — see that
+  module's own note below for what this replaced.
 - `settings.py` — `Settings.load(path, local_path)` / `Settings.current()`, reads `settings.json` +
   `settings.local.json` by default; `path` is a DI'd parameter (default `./settings.json`) so
   callers/tests can point at a fixture instead. `local_path` defaults to a `settings.local.json`
@@ -50,7 +81,14 @@ and has no CLI/console script of its own.
   `quant_reader` role has no password), so that much can live in the committed `settings.json`. The
   real box hostname and `ssh_user`/`ssh_key_path` needed for quant-data's new auto-tunnel path are
   a different matter — those go in `settings.local.json` (gitignored) only, never a committed file
-  — see quant-data's `docs/DATABASE.md`'s `<ubuntu_host>`/`<ssh_user>` placeholders.
+  — see quant-data's `docs/DATABASE.md`'s `<ubuntu_host>`/`<ssh_user>` placeholders. Also
+  `WindowSettings` (`x`, `y`) and a `Settings.window` field, parsed the same way from an optional
+  `window` object — unlike `postgres`, nothing reads this from the committed `settings.json`;
+  `day_chart.chart.show_chart` treats it as a `settings.local.json`-only, auto-managed value (see
+  its own note below), not something a user hand-edits. `Settings.save_window_position(x, y,
+  local_path=...)` is the write side — reads whatever's currently in `local_path` (if anything),
+  replaces just the `window` key, and writes the whole file back, so it never clobbers unrelated
+  local overrides living in the same file (e.g. `postgres.sshKeyPath`).
 - `errors.py` — `AppError`, `TaskError`, `telemetry_session()`
 - `sessions.py` — `infer_session(timestamp_utc) -> str`, classifying a UTC timestamp into
   `"pre-market"` (4:00–9:30 ET), `"regular"` (9:30–16:00 ET), or `"after-market"` (16:00–20:00 ET);
@@ -81,8 +119,16 @@ and has no CLI/console script of its own.
     default to `None` (today's direct-connect behavior, unchanged); when both are set, quant-data
     opens and manages its own SSH tunnel instead of assuming one's already running externally
     ([croicu/quant-data#17](https://github.com/croicu/quant-data/issues/17)/
-    [croicu/quant-scratch#10](https://github.com/croicu/quant-scratch/issues/10)). Calls
-    `fetch_bars(ticker, target_date, target_date)` (a
+    [croicu/quant-scratch#10](https://github.com/croicu/quant-scratch/issues/10)). Also passes
+    `logger=Logger` to both calls ([quant-data#20](https://github.com/croicu/quant-data/issues/20))
+    so quant-data's own internal timing/connection log lines land in this repo's own `Logger`
+    stream. Doesn't wrap `fetch_bars` in its own perf marker — quant-data's `PostgresDatabase`
+    already emits one for that identical call via the injected logger, so a second one here would
+    just duplicate it. (The connection setup itself briefly regressed to a ~130s stall after
+    adopting the auto-tunnel, traced to `psycopg.connect()` being handed the ambiguous hostname
+    `"localhost"` instead of a concrete `"127.0.0.1"` — fixed upstream in
+    [quant-data#19](https://github.com/croicu/quant-data/issues/19), confirmed back down to ~1.4s.)
+    Calls `fetch_bars(ticker, target_date, target_date)` (a
     single-day range) and converts each returned `quant_data.OHLCV` into this repo's own `DayBar`,
     computing `session` via `sessions.infer_session` and carrying `incomplete` straight through.
     Normalizes `OHLCV.timestamp` to UTC-aware before use — it's been observed coming back naive
@@ -149,12 +195,57 @@ price/volume chart plus a CSV export. Depends on `defs` for the `IntraDayProvide
   is the interactive entry point: switches to the `TkAgg` backend, calls `render_chart`, shows the
   figure non-blocking (`plt.show(block=False)`), registers a `close_event` callback on
   `figure.canvas` that flips a flag, then polls the GUI event loop itself
-  (`while not closed: plt.pause(0.1)`) until that flag flips — i.e. until the user actually closes
-  the popup window — before returning. Doesn't rely on `plt.show()`'s own blocking mainloop — that
-  didn't reliably block when launched under the VS Code debugger (debugpy), closing the popup
-  instantly; polling the event loop directly works the same way regardless of that environment.
-  Kept separate from `render_chart` specifically so unit tests can
-  exercise figure construction without ever touching a GUI backend.
+  (`while not closed: figure.canvas.start_event_loop(0.1)`) until that flag flips — i.e. until the
+  user actually closes the popup window — before returning. Doesn't rely on `plt.show()`'s own
+  blocking mainloop — that didn't reliably block when launched under the VS Code debugger
+  (debugpy), closing the popup instantly; polling the event loop directly works the same way
+  regardless of that environment. Deliberately calls `figure.canvas.start_event_loop()` directly
+  rather than `plt.pause()`: `pyplot.pause()` calls `show(block=False)` on every single invocation,
+  and for TkAgg, `FigureManagerTk.show()` unconditionally calls `canvas.draw_idle()` once the
+  window's been shown once — not gated by `figure.stale` — forcing a full redraw of the whole
+  figure on every poll tick regardless of whether anything actually changed. For a 6-day chart that
+  measured ~1-1.5s per poll (vs the ~0.1s requested) — the real cause of the popup feeling
+  "painfully sluggish," isolated with throwaway probe scripts that ruled out the SSH tunnel, Tcl/Tk
+  itself (a pure-Tkinter `after()`+`mainloop()` probe stayed within a few ms of the requested
+  interval), and `figure.raise_window`'s topmost-attribute toggling before landing on this.
+  Bypassing `plt.pause()` still pumps Tk's event loop (so `close_event`/resize/etc. still fire),
+  just without the forced redraw — confirmed back down to ~0.1s/poll. Also wraps `figure.canvas.draw`
+  itself with a timing marker (`canvas.draw()`, `perf_ui`) — capturing the actual rendering cost
+  regardless of what triggered it (a resize, a poll-forced redraw, anything) — logs each individual
+  poll's duration (`event-loop poll N`, `perf_ui`) rather than only a final aggregate, and logs a
+  `resize_event` marker with the new canvas size (`perf_ui`, no duration — the resize's own cost
+  shows up as the `canvas.draw()` marker it triggers). Debounces resize-triggered redraws: wraps
+  `figure.canvas.draw_idle` so every call cancels any pending scheduled draw and reschedules one
+  `_RESIZE_DEBOUNCE_MS` (200ms) later via `tk_canvas.after`/`after_cancel`, rather than letting
+  every intermediate `<Configure>` event during a drag trigger its own full redraw immediately.
+  Needed because matplotlib's own `draw_idle()` dedup (skip if a draw's already scheduled) doesn't
+  help once each draw takes several seconds — by the time one finishes, the *next* queued resize
+  event (Windows streams `WM_SIZE` throughout a drag) triggers another one from scratch instead of
+  ever getting collapsed; measured 2-3 full ~5-8s redraws per single drag gesture before this,
+  down to exactly one after. Also remembers the popup's screen position across runs: reads
+  `Settings.window` (via its own `Settings.load()` call — `show_chart` has no `Settings` parameter,
+  since `cli.py` has no CLI flag for this and nothing to thread through) and applies it to the Tk
+  window with `.geometry(f"+{x}+{y}")` if it's within `_get_virtual_desktop_bounds()` — silently
+  falls back to the OS default position otherwise (a different monitor setup since it was last
+  saved, say). `_get_virtual_desktop_bounds()` exists specifically because `winfo_screenwidth`/
+  `winfo_screenheight` only report the *primary* monitor's resolution on Windows, not the full
+  virtual desktop spanning every monitor (which can have a negative origin, for one positioned
+  left of or above the primary) — a saved position on a secondary monitor would otherwise always
+  look "off-screen" and get silently discarded. Queries `GetSystemMetrics`
+  (`SM_XVIRTUALSCREEN`/`SM_YVIRTUALSCREEN`/`SM_CXVIRTUALSCREEN`/`SM_CYVIRTUALSCREEN`) via `ctypes`
+  on `win32`, falling back to `winfo_screenwidth`/`winfo_screenheight` (single-monitor bounds) on
+  any other platform or if that query fails for any reason. Tracks the window's position
+  live via a `<Configure>` binding on the toplevel window (updated on every move/resize) rather
+  than querying it once at close time: `close_event` fires in response to the widget's own
+  `<Destroy>` event, so by the time a post-close handler runs the window is already mid-teardown
+  and `winfo_x()`/`winfo_y()` raise — the fix isn't "catch that exception," it's "never query a
+  dying widget in the first place." Saves the last-tracked position via
+  `Settings.save_window_position()` right before closing. Both the read and the write are
+  best-effort (broad `except Exception`, logged as a warning, never fatal) and a no-op on any
+  backend without a real GUI window (`getattr(figure.canvas.manager, "window", None)` is `None`
+  for Agg, used in tests) — this is a nicety, never something the popup should fail over. Kept
+  separate from `render_chart` specifically so unit tests can exercise figure construction without
+  ever touching a GUI backend.
 - `cli.py` — `day-chart` entry point; `main()` takes optional `provider: IntraDayProvider`,
   `settings_path: Path`, `output_dir: Path`, and `show_chart: ShowChartFn` (`Callable[[str,
   list[DayChartData]], None]`) parameters — same parameter-based DI pattern as `stock_quote.cli`

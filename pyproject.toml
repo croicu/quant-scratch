@@ -12,7 +12,7 @@ requires-python = ">=3.12"
 dependencies = [
     "yfinance>=0.2.28",
     "matplotlib>=3.9",
-    "quant-data @ git+https://github.com/croicu/quant-data.git@049b8ae0d73da4ae1e512c08ad44c5046c594e2e",
+    "quant-data @ git+https://github.com/croicu/quant-data.git@dbec9fa78a07613c5b536ae65a6cc8c2a2d25fe9",
 ]
 
 [project.scripts]

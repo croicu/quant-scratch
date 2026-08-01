@@ -106,6 +106,29 @@ The real hostname/`sshUser`/`sshKeyPath` are not secret in the sense of needing 
 they identify a specific private machine — keep this block in `settings.local.json` (gitignored),
 never the committed `settings.json`.
 
+### Settings: `window` section (`settings.local.json`, auto-managed — don't hand-edit)
+
+Optional. When present, `day-chart` opens its popup at this screen position instead of the OS
+default:
+
+```json
+{
+  "settings": {
+    "window": {
+      "x": 100,
+      "y": 200
+    }
+  }
+}
+```
+
+Both `day_chart.chart.show_chart` writes and reads this itself — it saves the popup's position to
+`settings.local.json` (never the committed `settings.json`, since it's a per-machine UI preference)
+every time the window closes, and applies it on the next open. Purely a hint: if the saved position
+would land off the current screen (e.g. a different monitor setup since it was last saved), it's
+ignored and the OS default position is used instead. `cli.py` has no flag for this and no role in
+it — the read/write happens entirely inside `chart.py`.
+
 ## File formats
 
 <!-- Schemas for any files this project reads or writes. -->

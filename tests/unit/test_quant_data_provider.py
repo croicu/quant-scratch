@@ -6,6 +6,7 @@ import pytest
 from quant_data import OHLCV
 
 from defs.protocols import DayBar
+from shared.diagnostics import Logger
 from shared.errors import AppError
 from shared.providers import quant_data as quant_data_module
 from shared.providers.quant_data import QuantDataIntraDay
@@ -143,15 +144,20 @@ def test_constructor_requires_client_or_connection_details():
         QuantDataIntraDay()
 
 
-def test_constructor_forwards_ssh_kwargs_to_create_postgres_provider(monkeypatch):
+def test_constructor_forwards_ssh_kwargs_and_logger_to_create_postgres_provider(monkeypatch):
     captured_kwargs = {}
+    captured_market_data_logger = {}
 
     def fake_create_postgres_provider(**kwargs):
         captured_kwargs.update(kwargs)
         return object()
 
+    def fake_market_data(provider, logger=None):
+        captured_market_data_logger["logger"] = logger
+        return FakeMarketData()
+
     monkeypatch.setattr(quant_data_module, "create_postgres_provider", fake_create_postgres_provider)
-    monkeypatch.setattr(quant_data_module, "MarketData", lambda provider: FakeMarketData())
+    monkeypatch.setattr(quant_data_module, "MarketData", fake_market_data)
 
     QuantDataIntraDay(
         host="CroicuWS1",
@@ -163,3 +169,7 @@ def test_constructor_forwards_ssh_kwargs_to_create_postgres_provider(monkeypatch
 
     assert captured_kwargs["ssh_user"] == "alex"
     assert captured_kwargs["ssh_key_path"] == "/home/alex/.ssh/id_ed25519"
+    # quant-data's LoggingSink protocol expects our own Logger injected (quant-data#20), so its
+    # internal timing/connection markers land in the same stream as ours instead of being invisible.
+    assert captured_kwargs["logger"] is Logger
+    assert captured_market_data_logger["logger"] is Logger

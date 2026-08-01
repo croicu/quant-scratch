@@ -104,6 +104,7 @@ rollout-tracking issue) once a second consumer repo actually exists.
 
 - Before implementing any feature or non-trivial change, ask clarifying questions until the intent is unambiguous.
 - If anything is unclear or could be interpreted multiple ways, ask — do not assume and implement.
+- After finishing a change, stop and let the user review/test it while it's still visible as an uncommitted diff in the editor (e.g. VS Code's Source Control view) — don't run `git add`/`git commit` right after finishing an edit. Wait for explicit go-ahead before committing.
 
 ### Task workflow
 

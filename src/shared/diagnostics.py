@@ -8,6 +8,17 @@ from enum import Enum
 # Not a closed enum: category is an open string so callers can introduce new categories
 # without editing this file. CATEGORY_GENERAL is the only one every log call defaults to.
 CATEGORY_GENERAL = "general"
+# Timing markers (connection setup, fetch duration, render duration, popup wait time, ...) --
+# shared across packages so they can all be enabled/disabled together via one settings.json
+# logCategories entry, rather than each module inventing its own perf category name.
+CATEGORY_PERF = "perf"
+# Finer-grained UI-loop timing (per event-loop poll, actual canvas.draw() duration, resize
+# events, ...) -- split from CATEGORY_PERF since it's much higher-volume (one line per ~100ms
+# poll tick while a popup is open) and only useful when actively diagnosing UI responsiveness,
+# not for a routine perf overview. A flat sibling category for now, not a true "perf/ui"
+# subcategory -- logCategories has no hierarchy today, so this is the closest approximation until
+# (if ever) that's worth adding.
+CATEGORY_PERF_UI = "perf_ui"
 
 
 class TelemetryLevel(Enum):
@@ -158,6 +169,15 @@ class Logger:
     @staticmethod
     def info(message: str, category: str = CATEGORY_GENERAL) -> None:
         Logger._sink().info(message, category)
+
+    @staticmethod
+    def perf(description: str, elapsed_seconds: float, category: str = CATEGORY_PERF) -> None:
+        # Duration-first so timing markers are grep/scan-able without reading past the message
+        # first: "duration: 0.081s - quant-data query for SPY on 2026-07-21", not the reverse.
+        # `category` is additive (defaults to CATEGORY_PERF, matching the call shape
+        # quant_data.protocols.LoggingSink expects) -- lets callers route high-volume UI-loop
+        # markers to CATEGORY_PERF_UI instead without a second method.
+        Logger._sink().info(f"duration: {elapsed_seconds:.3f}s - {description}", category)
 
     @staticmethod
     def warning(message: str, category: str = CATEGORY_GENERAL) -> None:

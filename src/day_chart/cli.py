@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
+from time import perf_counter
 
 from defs.contracts import IntraDayProvider
 from shared.diagnostics import ConsoleLogSink, Logger
@@ -141,12 +142,33 @@ def main(
     output_dir: Path | None = None,
     show_chart: ShowChartFn | None = None,
 ) -> int:
+    cli_start = perf_counter()
     arguments = parse_args(sys.argv[1:] if argv is None else argv)
     active_output_dir = Path(".") if output_dir is None else output_dir
 
     try:
         settings = Settings.load() if settings_path is None else Settings.load(path=settings_path)
+    except AppError as error:
+        print(f"day-chart: error: {error}", file=sys.stderr)
+        return 1
 
+    debug = settings.debug or arguments.debug
+
+    # Installed as early as possible -- anything that runs before this point (arg parsing,
+    # Settings.load()) can't be logged at all, since ConsoleLogSink needs settings.logging/
+    # log_categories/excluded_categories first. Previously this happened *after* constructing
+    # QuantDataIntraDay (which opens the SSH tunnel/DB connection), so that connection's own perf
+    # marker was silently swallowed by the default no-op sink -- moved up so it's visible.
+    Logger.set_logger(
+        ConsoleLogSink(
+            min_level=settings.logging,
+            categories=settings.log_categories,
+            excluded_categories=settings.excluded_categories,
+        )
+    )
+    Logger.perf("cli started, args parsed and settings loaded", perf_counter() - cli_start)
+
+    try:
         if provider is not None:
             active_provider = provider
         else:
@@ -161,24 +183,13 @@ def main(
                 ssh_user=settings.postgres.ssh_user,
                 ssh_key_path=settings.postgres.ssh_key_path,
             )
-    except AppError as error:
-        print(f"day-chart: error: {error}", file=sys.stderr)
-        return 1
 
-    debug = settings.debug or arguments.debug
+        active_show_chart = chart.show_chart if show_chart is None else show_chart
 
-    Logger.set_logger(
-        ConsoleLogSink(
-            min_level=settings.logging,
-            categories=settings.log_categories,
-            excluded_categories=settings.excluded_categories,
-        )
-    )
-    active_show_chart = chart.show_chart if show_chart is None else show_chart
-
-    try:
         normalized_ticker = arguments.ticker.upper()
         is_range_mode = arguments.start_date is not None or arguments.end_date is not None
+
+        fetch_phase_start = perf_counter()
 
         if is_range_mode:
             session_dates = resolve_date_range(arguments.start_date, arguments.end_date)
@@ -203,12 +214,17 @@ def main(
 
             csv_path = active_output_dir / f"{normalized_ticker}_{session_date.isoformat()}_data.csv"
 
+        Logger.perf(f"fetch phase ({len(days)} day(s))", perf_counter() - fetch_phase_start)
+
         all_bars = []
         for _, day_bars in days:
             all_bars.extend(day_bars)
 
         active_show_chart(normalized_ticker, days)
+
+        write_start = perf_counter()
         csv_path.write_text(bars_to_csv(all_bars), encoding="utf-8", newline="")
+        Logger.perf(f"wrote {len(all_bars)} rows to {csv_path}", perf_counter() - write_start)
 
         print(f"day-chart: wrote {csv_path}")
         return 0
