@@ -11,7 +11,10 @@ from time import perf_counter
 from defs.contracts import IntraDayProvider
 from shared.diagnostics import ConsoleLogSink, Logger
 from shared.errors import AppError
+from shared.providers import yahoo_finance
+from shared.providers.ibkr import IBKRIntraDay
 from shared.providers.quant_data import QuantDataIntraDay
+from shared.providers.yahoo_finance import YahooFinanceIntraDay
 from shared.settings import Settings
 
 from . import chart
@@ -19,6 +22,22 @@ from .chart import DayChartData
 from .output import bars_to_csv
 
 CATEGORY_DATE_RANGE = "date_range"
+
+PROVIDER_IBKR = "ibkr"
+PROVIDER_QUANT_DATA = "quant-data"
+# Alias of yahoo_finance.PROVIDER_NAME, not an independent literal -- same reasoning as
+# stock_quote.cli's PROVIDER_YAHOO/PROVIDER_IBKR aliases (see that module's own comment). day-chart
+# doesn't stamp a provider identity onto DayBar the way stock-quote does onto StockQuote, but
+# keeping this one aliased too avoids a stray third spelling of "yahoo" existing in the codebase.
+PROVIDER_YAHOO = yahoo_finance.PROVIDER_NAME
+
+# IBKR's historical-data API enforces its own pacing limits (documented ceiling: 60 requests per
+# 10 minutes). Range mode calls fetch_bars once per day, so an unbounded range could plausibly
+# cross that ceiling -- a live probe of 7 rapid same-contract requests (~2.6s total) found no
+# pacing-violation errors, well below this cap, so 30 stays a comfortable, untested-but-documented
+# margin rather than a measured breaking point. quant-data has no equivalent constraint (Postgres
+# reads), so this only applies to the ibkr provider.
+MAX_IBKR_RANGE_DAYS = 30
 
 ShowChartFn = Callable[[str, list[DayChartData]], None]
 
@@ -29,13 +48,14 @@ class CliArguments:
     date: str | None = None
     start_date: str | None = None
     end_date: str | None = None
+    provider: str = PROVIDER_IBKR
     debug: bool = False
 
 
 def parse_args(argv: list[str]) -> CliArguments:
     parser = argparse.ArgumentParser(
         prog="day-chart",
-        usage="day-chart TICKER [--date YYYY-MM-DD | --start-date YYYY-MM-DD --end-date YYYY-MM-DD] [--debug]",
+        usage="day-chart TICKER [--date YYYY-MM-DD | --start-date YYYY-MM-DD --end-date YYYY-MM-DD] [--provider {ibkr,quant-data,yahoo}] [--debug]",
         description="Fetch full-day intraday bars for a stock ticker, pop up a price/volume chart, and export a CSV.",
     )
 
@@ -56,6 +76,17 @@ def parse_args(argv: list[str]) -> CliArguments:
         help="end of a date range as YYYY-MM-DD; overrides --date. Defaults to today (or the last trading day if today is a weekend) if omitted.",
     )
     parser.add_argument(
+        "--provider",
+        choices=[PROVIDER_IBKR, PROVIDER_QUANT_DATA, PROVIDER_YAHOO],
+        default=PROVIDER_IBKR,
+        help=(
+            f"intraday data source; '{PROVIDER_IBKR}' (default) has real extended-hours volume, "
+            f"'{PROVIDER_QUANT_DATA}' reads the quant-data warehouse (Yahoo-sourced, no extended-hours volume), "
+            f"'{PROVIDER_YAHOO}' hits Yahoo directly (same extended-hours gap as quant-data's ingest -- "
+            f"useful for comparing what's actually in the warehouse against the raw source, not for everyday use)"
+        ),
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         default=False,
@@ -69,6 +100,7 @@ def parse_args(argv: list[str]) -> CliArguments:
         date=args.date,
         start_date=args.start_date,
         end_date=args.end_date,
+        provider=args.provider,
         debug=args.debug,
     )
 
@@ -135,6 +167,33 @@ def _last_trading_day(current_date: date) -> date:
     return current_date
 
 
+def _build_provider(provider_name: str, settings: Settings) -> IntraDayProvider:
+    if provider_name == PROVIDER_IBKR:
+        ibkr_settings = settings.ibkr
+        if ibkr_settings is None:
+            return IBKRIntraDay()
+        return IBKRIntraDay(
+            host=ibkr_settings.host,
+            port=ibkr_settings.port,
+            client_id=ibkr_settings.client_id,
+        )
+
+    if provider_name == PROVIDER_YAHOO:
+        return YahooFinanceIntraDay()
+
+    if settings.postgres is None:
+        raise AppError("day-chart requires a 'postgres' section in settings.json to reach quant-data.")
+    return QuantDataIntraDay(
+        host=settings.postgres.host,
+        port=settings.postgres.port,
+        dbname=settings.postgres.dbname,
+        user=settings.postgres.user,
+        password=settings.postgres.password,
+        ssh_user=settings.postgres.ssh_user,
+        ssh_key_path=settings.postgres.ssh_key_path,
+    )
+
+
 def main(
     argv: list[str] | None = None,
     provider: IntraDayProvider | None = None,
@@ -169,20 +228,7 @@ def main(
     Logger.perf("cli started, args parsed and settings loaded", perf_counter() - cli_start)
 
     try:
-        if provider is not None:
-            active_provider = provider
-        else:
-            if settings.postgres is None:
-                raise AppError("day-chart requires a 'postgres' section in settings.json to reach quant-data.")
-            active_provider = QuantDataIntraDay(
-                host=settings.postgres.host,
-                port=settings.postgres.port,
-                dbname=settings.postgres.dbname,
-                user=settings.postgres.user,
-                password=settings.postgres.password,
-                ssh_user=settings.postgres.ssh_user,
-                ssh_key_path=settings.postgres.ssh_key_path,
-            )
+        active_provider = provider if provider is not None else _build_provider(arguments.provider, settings)
 
         active_show_chart = chart.show_chart if show_chart is None else show_chart
 
@@ -193,6 +239,13 @@ def main(
 
         if is_range_mode:
             session_dates = resolve_date_range(arguments.start_date, arguments.end_date)
+
+            if arguments.provider == PROVIDER_IBKR and len(session_dates) > MAX_IBKR_RANGE_DAYS:
+                raise AppError(
+                    f"Range of {len(session_dates)} days exceeds the {MAX_IBKR_RANGE_DAYS}-day cap for "
+                    f"--provider {PROVIDER_IBKR} (IBKR historical-data pacing limits, untested past this size -- "
+                    f"use --provider {PROVIDER_QUANT_DATA} for longer ranges)."
+                )
 
             days: list[DayChartData] = []
             for session_date in session_dates:

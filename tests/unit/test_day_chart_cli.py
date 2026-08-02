@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from day_chart import cli
+from shared.settings import IBKRSettings, Settings
 from tests.mocks.quant_data import MockQuantDataIntraDay
 
 SETTINGS_PATH = Path(__file__).parent.parent / "data" / "settings.json"
@@ -136,7 +137,7 @@ def test_main_exits_two_on_missing_argument():
 
 def test_main_returns_one_when_postgres_settings_missing(tmp_path, capsys):
     exit_code = cli.main(
-        ["SPY", "--date", "2026-01-02"],
+        ["SPY", "--date", "2026-01-02", "--provider", "quant-data"],
         settings_path=SETTINGS_PATH,
         output_dir=tmp_path,
     )
@@ -197,3 +198,77 @@ def test_main_range_mode_returns_one_when_every_day_has_no_data(tmp_path, capsys
     captured = capsys.readouterr()
     assert exit_code == 1
     assert "error" in captured.err
+
+
+def test_build_provider_ibkr_uses_defaults_when_no_ibkr_settings(monkeypatch):
+    captured_kwargs = {}
+
+    class FakeIBKRIntraDay:
+        def __init__(self, **kwargs):
+            captured_kwargs.update(kwargs)
+
+    monkeypatch.setattr(cli, "IBKRIntraDay", FakeIBKRIntraDay)
+    settings = Settings(debug=False)  # ibkr defaults to None
+
+    provider = cli._build_provider(cli.PROVIDER_IBKR, settings)
+
+    assert isinstance(provider, FakeIBKRIntraDay)
+    assert captured_kwargs == {}
+
+
+def test_build_provider_ibkr_forwards_settings_ibkr_fields(monkeypatch):
+    captured_kwargs = {}
+
+    class FakeIBKRIntraDay:
+        def __init__(self, **kwargs):
+            captured_kwargs.update(kwargs)
+
+    monkeypatch.setattr(cli, "IBKRIntraDay", FakeIBKRIntraDay)
+    settings = Settings(debug=False, ibkr=IBKRSettings(host="10.0.0.5", port=4001, client_id=9))
+
+    cli._build_provider(cli.PROVIDER_IBKR, settings)
+
+    assert captured_kwargs == {"host": "10.0.0.5", "port": 4001, "client_id": 9}
+
+
+def test_build_provider_quant_data_raises_when_postgres_settings_missing():
+    settings = Settings(debug=False)  # postgres defaults to None
+
+    with pytest.raises(cli.AppError):
+        cli._build_provider(cli.PROVIDER_QUANT_DATA, settings)
+
+
+def test_build_provider_yahoo_needs_no_settings():
+    settings = Settings(debug=False)  # postgres/ibkr both None -- yahoo needs neither
+
+    provider = cli._build_provider(cli.PROVIDER_YAHOO, settings)
+
+    assert type(provider).__name__ == "YahooFinanceIntraDay"
+
+
+def test_main_range_mode_rejects_oversized_range_for_ibkr_provider(tmp_path, capsys):
+    # No provider injected -- IBKRIntraDay() constructs offline (connect-per-call, not at
+    # __init__), so this exercises the real default-provider path up to the cap check.
+    exit_code = cli.main(
+        ["SPY", "--start-date", "2026-01-01", "--end-date", "2026-03-01"],  # > 30 days
+        settings_path=SETTINGS_PATH,
+        output_dir=tmp_path,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "cap" in captured.err
+
+
+def test_main_range_mode_ibkr_cap_does_not_apply_to_quant_data_provider(tmp_path):
+    # Same oversized range as above, but --provider quant-data has no pacing constraint to cap --
+    # only the two fixture-backed days (01-02, 01-05) actually chart, and the command still succeeds.
+    exit_code = cli.main(
+        ["SPY", "--start-date", "2026-01-01", "--end-date", "2026-03-01", "--provider", "quant-data"],
+        provider=MockQuantDataIntraDay(),
+        settings_path=SETTINGS_PATH,
+        output_dir=tmp_path,
+        show_chart=lambda ticker, days: None,
+    )
+
+    assert exit_code == 0

@@ -6,7 +6,7 @@
       "type": "debugpy",
       "request": "launch",
       "module": "stock_quote.cli",
-      "args": ["${input:ticker}"],
+      "args": ["${input:ticker}", "--provider", "yahoo"],
       "console": "integratedTerminal",
       "justMyCode": false
     },
@@ -24,7 +24,7 @@
       "type": "debugpy",
       "request": "launch",
       "module": "day_chart.cli",
-      "args": ["${input:ticker}", "--start-date", "${input:startDate}"],
+      "args": ["${input:ticker}", "--provider", "quant-data", "--start-date", "${input:startDate}"],
       "console": "integratedTerminal",
       "justMyCode": false
     },
@@ -67,7 +67,7 @@
       "id": "startDate",
       "type": "promptString",
       "description": "Range start date (YYYY-MM-DD) -- end defaults to today (or the last trading day if today is a weekend), giving a 7-day range with the default below",
-      "default": "2026-07-23"
+      "default": "2026-07-27"
     }
   ]
 }
