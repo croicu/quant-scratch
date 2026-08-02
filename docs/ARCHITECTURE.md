@@ -14,16 +14,23 @@ alternative implementation instead, depending only on `defs`. Also the intended 
 future cross-cutting non-implementation declarations (constants, etc.) — hence the general name
 rather than something provider-specific.
 
-- `protocols.py` — pure data: `StockQuote` (`ticker`, `price`, `timestamp`, `volume`);
-  `DayBar` (`timestamp: datetime` UTC-aware, `open`, `high`, `low`, `close`, `volume`, `session: str`,
-  `incomplete: bool` defaulting `False`). `DayBar.timestamp` is a `datetime` rather than a `str`
-  like `StockQuote.timestamp` — an intentional divergence, since bar data needs real datetime
-  arithmetic (session inference, sorting, ET conversion for the chart x-axis) that a string would
-  just force back into a parsed datetime anyway. `incomplete` mirrors
-  [quant-data](https://github.com/croicu/quant-data)'s `OHLCV.incomplete` field one-for-one — set
-  when the warehouse's provider couldn't supply full data for that bar (in practice, almost every
-  pre/after-market bar, since quant-data's own ingest still pulls from Yahoo Finance and inherits
-  its zero-volume gap outside regular hours).
+- `protocols.py` — pure data: `StockQuote` (`ticker`, `price`, `timestamp`, `volume`,
+  `provider: str`, `delayed: bool` defaulting `False`); `DayBar` (`timestamp: datetime` UTC-aware,
+  `open`, `high`, `low`, `close`, `volume`, `session: str`, `incomplete: bool` defaulting `False`).
+  `DayBar.timestamp` is a `datetime` rather than a `str` like `StockQuote.timestamp` — an
+  intentional divergence, since bar data needs real datetime arithmetic (session inference,
+  sorting, ET conversion for the chart x-axis) that a string would just force back into a parsed
+  datetime anyway. `incomplete` mirrors [quant-data](https://github.com/croicu/quant-data)'s
+  `OHLCV.incomplete` field one-for-one — set when the warehouse's provider couldn't supply full
+  data for that bar (in practice, almost every pre/after-market bar, since quant-data's own ingest
+  still pulls from Yahoo Finance and inherits its zero-volume gap outside regular hours).
+  `StockQuote.provider` (required, no default — every quote must know its source) holds whichever
+  provider fetched it, e.g. `"yahoo"`/`"ibkr"`; each provider stamps its own
+  `shared.providers.<module>.PROVIDER_NAME` constant onto it rather than the CLI passing a name in,
+  so the value can never drift from what actually produced the quote. `StockQuote.delayed` is the
+  live-quote analogue of `DayBar.incomplete`: `True` when a provider could only supply delayed (not
+  real-time) data. `YahooFinance`/`MockYahooFinance` never set it (stays the dataclass default
+  `False` — Yahoo's `fast_info` has no comparable live/delayed distinction surfaced today).
 - `contracts.py` — behavioral interfaces: `YahooFinanceProvider(Protocol)` — `fetch_quote(ticker) -> StockQuote`;
   `IntraDayProvider(Protocol)` — `fetch_bars(ticker, target_date) -> list[DayBar]`
 
@@ -89,6 +96,11 @@ and has no CLI/console script of its own.
   local_path=...)` is the write side — reads whatever's currently in `local_path` (if anything),
   replaces just the `window` key, and writes the whole file back, so it never clobbers unrelated
   local overrides living in the same file (e.g. `postgres.sshKeyPath`).
+  Also `IBKRSettings` (`host`, `port`, `client_id`, all with defaults) and a `Settings.ibkr` field,
+  parsed from an optional `ibkr` object (JSON key `clientId`) — unlike `postgres`, no required-keys
+  validation: every field already has a default matching `IBKRIntraDay`'s own constructor defaults
+  for this repo's one local paper-Gateway setup, so the section (or any key within it) may be
+  omitted, each falling back independently rather than requiring all-or-nothing.
 - `errors.py` — `AppError`, `TaskError`, `telemetry_session()`
 - `sessions.py` — `infer_session(timestamp_utc) -> str`, classifying a UTC timestamp into
   `"pre-market"` (4:00–9:30 ET), `"regular"` (9:30–16:00 ET), or `"after-market"` (16:00–20:00 ET);
@@ -103,8 +115,26 @@ and has no CLI/console script of its own.
   side by side without crowding a single flat file list.
   - `yahoo_finance.py` — `YahooFinance`, the default implementation of
     `defs.contracts.YahooFinanceProvider`; wraps `yfinance`, raises `AppError` on an invalid
-    ticker or network failure. Used only by `stock_quote` (a live single-quote lookup) — quant-data
-    has no equivalent concept, only historical bars, so this one wasn't replaced.
+    ticker or network failure. `stock_quote`'s default provider (a live single-quote lookup).
+    Defines `PROVIDER_NAME = "yahoo"`, stamped onto every `StockQuote.provider` it returns; also
+    re-exported as `stock_quote.cli.PROVIDER_YAHOO`/`day_chart.cli.PROVIDER_YAHOO` (aliases, not
+    duplicate literals) for each CLI's `--provider` flag choices.
+
+    `YahooFinanceIntraDay`, alongside it in the same file, implements
+    `defs.contracts.IntraDayProvider.fetch_bars(ticker, target_date) -> list[DayBar]` by wrapping
+    `yfinance.Ticker(...).history(interval="1m", prepost=True)`. Originally `day-chart`'s only
+    provider; removed entirely when quant-data's warehouse took over
+    ([issue #7](https://github.com/croicu/quant-scratch/issues/7) — re-fetching Yahoo directly was
+    pure duplication once quant-data's own ingest already pulled from Yahoo and stored it),
+    restored as a third selectable `--provider yahoo`
+    ([tasks/day_chart_yahoo_provider.md](../tasks/day_chart_yahoo_provider.md) /
+    [issue #14](https://github.com/croicu/quant-scratch/issues/14)) — not for its data quality (it
+    has the same pre-/after-market zero-volume gap `quant-data`'s ingest inherits from it: confirmed
+    315/315 pre-market bars zero-volume for a live SPY pull, identical to the historical
+    Yahoo-vs-IBKR comparison that motivated `IBKRIntraDay` in the first place), but so a raw-source
+    fetch can be compared directly against what's actually in the warehouse. No settings needed
+    (`yfinance` takes no connection config). Carries the same known limitation forward unchanged,
+    not a regression — this provider exists for comparison, not everyday use.
   - `quant_data.py` — `QuantDataIntraDay`, the default implementation of
     `defs.contracts.IntraDayProvider`. Thin wrapper around
     [quant-data](https://github.com/croicu/quant-data)'s public `MarketData` read client — imports
@@ -169,9 +199,36 @@ and has no CLI/console script of its own.
     `BarData` carries no such flag (unlike quant-data's `OHLCV.incomplete`) and a zero-volume
     1-minute bar here is presumed to mean "genuinely no trades that minute," not missing data.
     Defaults to `host="127.0.0.1"`, `port=4002` (IB Gateway's paper-trading API port -- this repo's
-    Gateway instance runs paper, not live), `client_id=1`. Not yet wired into `day-chart`'s
-    provider selection (`QuantDataIntraDay` is still the only default) -- see the task file's open
-    items.
+    Gateway instance runs paper, not live), `client_id=1`, all overridable via `Settings.ibkr`.
+    Wired into `day_chart.cli` as the **default** provider (see below) -- IBKR has strictly more
+    data than the Yahoo-sourced quant-data path, per
+    [tasks/day_chart_ibkr_integration.md](../tasks/day_chart_ibkr_integration.md) /
+    [issue #12](https://github.com/croicu/quant-scratch/issues/12). `connect()` passes
+    `fetchFields=StartupFetch(0)` (from `ib_async.ib`) -- the library's default startup fetch
+    (positions/open+completed orders/account updates) needs write-level API access, which a
+    Read-Only API Gateway (the sensible setting here: no trading involved) rejects, surfacing as
+    noisy stdout warnings and a "needs API write access" Gateway popup on every connection. This
+    provider never touches any of that, only `reqHistoricalData`, so there's nothing to fetch at
+    startup -- `StartupFetch(0)` (an empty flag set) skips it entirely, incidentally also cutting
+    `connect()` from ~10s (spent on those requests timing out) down to under 10ms.
+
+    `IBKRQuote`, alongside it in the same file (same external source, same connection lifecycle),
+    implements `defs.contracts.YahooFinanceProvider.fetch_quote(ticker) -> StockQuote`. Built for
+    `stock-quote`'s `--provider ibkr`
+    ([tasks/stock_quote_ibkr_integration.md](../tasks/stock_quote_ibkr_integration.md) /
+    [issue #13](https://github.com/croicu/quant-scratch/issues/13)). Calls `ib.reqTickers(contract)`
+    for a live quote first; if that comes back with `last` unset (`NaN` -- confirmed empirically:
+    this account has no real-time market-data subscription, error 10089, and IBKR does *not*
+    auto-fall-back), calls `ib.reqMarketDataType(3)` and retries once, this time getting delayed
+    data (~15-20 minutes, free, no subscription needed). `StockQuote.delayed` is set from the
+    *actual* `ticker.marketDataType` returned (`!= 1`), not from which branch ran -- an account with
+    real live entitlement would get `delayed=False` even though the code path looks identical.
+    Same `client_factory`/connect-per-call/`fetchFields=StartupFetch(0)` shape as `IBKRIntraDay`.
+    Unlike `day-chart`'s flip to `ibkr` as default, `stock-quote` keeps `yahoo` as the default --
+    IBKR's free tier here is strictly *more delayed* than Yahoo's near-real-time quote, the
+    opposite tradeoff from `day-chart`'s extended-hours-volume case, so no default change was
+    warranted. Defines `PROVIDER_NAME = "ibkr"`, stamped onto every `StockQuote.provider` it
+    returns -- same re-export pattern as `yahoo_finance.py`'s (`stock_quote.cli.PROVIDER_IBKR`).
 
 ### `ibkr_fetch` -- manual pipeline-validation script (not a registered CLI)
 
@@ -187,15 +244,27 @@ Defaults to `SPY`/`2026-07-31`, the task's original validation scope.
 
 Fetches and prints the current quote for a single stock ticker. Depends on `defs` for the
 `YahooFinanceProvider` interface and `StockQuote` data type, and on `shared` for the default
-`YahooFinance` implementation plus `Settings`/`Logger`/`AppError`. No dependency on `yfinance`
-directly — that's confined to `shared/providers/yahoo_finance.py`.
+`YahooFinance`/`IBKRQuote` implementations plus `Settings`/`Logger`/`AppError`. No dependency on
+`yfinance` directly — that's confined to `shared/providers/yahoo_finance.py`.
 
-- `output.py` — `quote_to_csv(quote) -> str`
+- `output.py` — `quote_to_csv(quote) -> str`; columns include `provider` and `delayed`
 - `cli.py` — `stock-quote` entry point; `main()` takes optional `provider: YahooFinanceProvider` and
-  `settings_path: Path` parameters (defaulting to `shared.providers.yahoo_finance.YahooFinance()` and
-  `Settings.load()`'s own default path respectively) — simple parameter-based DI, no framework,
-  letting tests inject `tests.mocks.yahoo_finance.MockYahooFinance` and a fixture settings file
-  instead of monkeypatching or relying on `chdir` for isolation
+  `settings_path: Path` parameters — simple parameter-based DI, no framework, letting tests inject
+  `tests.mocks.yahoo_finance.MockYahooFinance` and a fixture settings file instead of monkeypatching
+  or relying on `chdir` for isolation. `--provider {yahoo,ibkr}` (default `yahoo`, *not* flipped to
+  `ibkr` — see `shared/providers/ibkr.py`'s `IBKRQuote` note above for why) selects the default
+  construction path via `_build_provider(provider_name, settings) -> YahooFinanceProvider` — same
+  name, shape, and purpose as `day_chart.cli`'s helper: constructed only when no `provider` was
+  injected, and only after `Settings.load()` succeeds (provider construction moved after settings
+  loading for this reason — previously `YahooFinance()` was constructed unconditionally before
+  settings were even loaded, since there was nothing to select). `yahoo` needs no settings section;
+  `ibkr` reads `Settings.ibkr` (or falls back to `IBKRQuote`'s own defaults if absent, same as
+  `day_chart.cli`'s `ibkr` branch). `PROVIDER_YAHOO`/`PROVIDER_IBKR` here aren't independent string
+  literals — they're aliases of each provider's own `PROVIDER_NAME` (`from shared.providers import
+  ibkr, yahoo_finance`), so the `--provider` flag's choices and each `StockQuote.provider`'s actual
+  value structurally can't drift apart (unlike, say, `CATEGORY_QUOTE_FETCH`, which *is* duplicated
+  as a matching literal across `yahoo_finance.py`/`ibkr.py` — a log category mismatch is harmless
+  where a provider-identity mismatch wouldn't be).
 
 ### `day_chart` — second experiment CLI
 
@@ -282,30 +351,54 @@ price/volume chart plus a CSV export. Depends on `defs` for the `IntraDayProvide
   `settings_path: Path`, `output_dir: Path`, and `show_chart: ShowChartFn` (`Callable[[str,
   list[DayChartData]], None]`) parameters — same parameter-based DI pattern as `stock_quote.cli`
   (tests inject a non-GUI stand-in for `show_chart`, same reason `provider` is injected instead of
-  hitting a real database). Unlike `stock_quote`, the default provider can't be constructed before
-  settings are loaded (it needs `Settings.postgres` for connection details), so provider
-  construction happens *after* `Settings.load()` succeeds: `QuantDataIntraDay(host=settings.postgres.host,
-  ...)` if no `provider` was injected, raising `AppError` if `settings.postgres` is absent.
-  `output_dir` has no CLI flag (`--output-dir` was deliberately deferred); it exists purely as a
-  test seam, the same role `settings_path` plays — it now only affects where the CSV lands, since
-  the chart itself is shown in a popup rather than saved. Owns `resolve_session_date(date_argument,
-  today)` — resolves the `--date` argument to a concrete session date, defaulting to today or
-  rolling back to the prior Friday if today is a weekend, and raising `AppError` for a malformed,
-  future, or weekend date — used when neither `--start-date` nor `--end-date` is given. Also owns
+  hitting a real database/Gateway). `--provider {ibkr,quant-data,yahoo}` (default `ibkr`) selects
+  which data source backs the default construction path — a real behavior change from when
+  quant-data was the only option, deliberate: IBKR has strictly more data (real extended-hours
+  volume) than the Yahoo-sourced quant-data path (see `shared/providers/ibkr.py`'s note above and
+  [issue #12](https://github.com/croicu/quant-scratch/issues/12)). `yahoo`
+  (`YahooFinanceIntraDay`, restored per [issue #14](https://github.com/croicu/quant-scratch/issues/14))
+  is the third option, added purely for comparing a raw-source fetch against what's actually in the
+  quant-data warehouse — not a data-quality improvement (see `shared/providers/yahoo_finance.py`'s
+  note above). The default provider can't be constructed before settings are loaded (`ibkr` needs
+  `Settings.ibkr`, `quant-data` needs `Settings.postgres`, `yahoo` needs nothing), so construction
+  happens *after* `Settings.load()` succeeds, via `_build_provider(provider_name, settings) ->
+  IntraDayProvider` — a small pure function factored out specifically so a unit test can assert the
+  right provider *class* gets constructed (with what settings-derived arguments) without ever
+  touching a real connection: `IBKRIntraDay.__init__` doesn't connect either way (connect-per-
+  `fetch_bars`-call, see its own note above), and `YahooFinanceIntraDay.__init__` takes no
+  arguments at all, so constructing either in a test is already offline-safe;
+  `QuantDataIntraDay.__init__` does connect eagerly, so no test exercises its construction path for
+  real, same as before this change. `_build_provider` raises `AppError` if the provider-specific
+  required settings are missing (`quant-data` requires `Settings.postgres`; `ibkr`/`yahoo` have no
+  required settings — `ibkr`'s absent `Settings.ibkr` just means every field falls back to its own
+  default, and `yahoo` reads no settings at all). `output_dir` has no CLI flag
+  (`--output-dir` was deliberately deferred); it exists purely as a test seam, the same role
+  `settings_path` plays — it now only affects where the CSV lands, since the chart itself is shown
+  in a popup rather than saved. Owns `resolve_session_date(date_argument, today)` — resolves the
+  `--date` argument to a concrete session date, defaulting to today or rolling back to the prior
+  Friday if today is a weekend, and raising `AppError` for a malformed, future, or weekend date —
+  used when neither `--start-date` nor `--end-date` is given. Also owns
   `resolve_date_range(start_date_argument, end_date_argument, today)` — used instead of
   `resolve_session_date` whenever either range flag is given (`--date` is ignored in that case):
   `--end-date` alone defaults its start to the same day (so `--end-date X` alone behaves like
   `--date X`); `--start-date` alone defaults its end to today's `resolve_session_date`-style default;
   both given must satisfy `start <= end` (`AppError` otherwise). Individual range bounds are only
   format/future-validated, *not* weekend-rejected like `resolve_session_date` — a range legitimately
-  spans weekends, which `main()` then skips. For each resolved day, `main()` calls
-  `provider.fetch_bars` individually; in range mode (2+ days), a per-day `AppError` (weekend,
-  holiday, not-yet-ingested) is caught, logged via `Logger.warning` (category `date_range`), and
-  that day is dropped from the chart rather than failing the whole command — only if *every* day in
-  the range comes back empty does the command fail. In single-day mode, a fetch failure still
-  propagates directly as before (unchanged). The CSV export flattens all charted days' bars into one
-  file — `<TICKER>_<DATE>_data.csv` for a single day, `<TICKER>_<START>_<END>_data.csv` (the
-  requested range's bounds, not just the days that actually had data) for a range.
+  spans weekends, which `main()` then skips. In range mode with `--provider ibkr`, a resolved range
+  longer than `MAX_IBKR_RANGE_DAYS` (30) is rejected with `AppError` before any `fetch_bars` call —
+  a margin under IBKR's documented 60-requests/10-minutes historical-data pacing ceiling that a
+  per-day fetch loop could otherwise plausibly cross for a large range (a live probe of 7 rapid
+  same-contract requests found no violation well below this cap, but 60+ at once is untested; see
+  [tasks/day_chart_ibkr_integration.md](../tasks/day_chart_ibkr_integration.md)). No such cap
+  applies to `quant-data` (no external pacing constraint on Postgres reads). For each resolved day,
+  `main()` calls `provider.fetch_bars` individually; in range mode (2+ days), a per-day `AppError`
+  (weekend, holiday, not-yet-ingested) is caught, logged via `Logger.warning` (category
+  `date_range`), and that day is dropped from the chart rather than failing the whole command —
+  only if *every* day in the range comes back empty does the command fail. In single-day mode, a
+  fetch failure still propagates directly as before (unchanged). The CSV export flattens all
+  charted days' bars into one file — `<TICKER>_<DATE>_data.csv` for a single day,
+  `<TICKER>_<START>_<END>_data.csv` (the requested range's bounds, not just the days that actually
+  had data) for a range.
 
 ### Test doubles (`tests/`)
 
@@ -327,18 +420,39 @@ price/volume chart plus a CSV export. Depends on `defs` for the `IntraDayProvide
   don't depend on cwd isolation. Deliberately has no `postgres` section — exercises the "missing
   config" error path; day-chart's happy-path CLI tests inject a `provider` directly instead of
   relying on settings-driven construction (which would require a real database connection, and
-  unit tests must run offline).
+  unit tests must run offline). Also has no `ibkr` section, which is fine either way — unlike
+  `postgres`, that's a legitimate ("use all defaults") state rather than an error path, and since
+  `IBKRIntraDay.__init__` never connects, a test exercising real default-provider construction
+  (e.g. an oversized-range rejection that never reaches `fetch_bars`) can let it build for real
+  without violating the offline-unit-test rule.
+- `tests/unit/test_ibkr_quote.py`'s `_ticker(...)` helper — not a mock module under `tests/mocks/`
+  (this one's private to that single test file), but worth flagging: `ib_async.Ticker.__post_init__`
+  silently resets `last`/`volume`/`bid`/`ask`/etc. back to its own NaN sentinel unless
+  `created=True` is also passed to the constructor. Discovered the hard way (a test constructing
+  `Ticker(last=150.25, ...)` directly got `last=nan` back, not 150.25) — a real
+  `ib_async`-specific quirk, not a general dataclass-testing concern: `ib_async.BarData` (used the
+  same way in `test_ibkr_provider.py`) has no `__post_init__` and needs no equivalent workaround.
 
 ## Data flow
 
-`stock-quote TICKER` → injected `YahooFinanceProvider.fetch_quote` (real: `shared.providers.yahoo_finance.YahooFinance`,
-a `yfinance` network call; test: `tests.mocks.yahoo_finance.MockYahooFinance`, a fixture lookup) →
-`StockQuote` → `output.quote_to_csv` → stdout.
+`stock-quote TICKER [--provider {yahoo,ibkr}]` → `cli._build_provider` (skipped if a `provider` was
+injected) selects `shared.providers.yahoo_finance.YahooFinance` (default) or
+`shared.providers.ibkr.IBKRQuote` from `Settings.ibkr` → injected `YahooFinanceProvider.fetch_quote`
+(real, `yahoo`: a `yfinance` network call; real, `ibkr`: a connect-per-call `ib_async` request
+against a local IB Gateway/TWS instance, live-first with an automatic delayed-data fallback; test:
+`tests.mocks.yahoo_finance.MockYahooFinance`, a fixture lookup) → `StockQuote` →
+`output.quote_to_csv` → stdout.
 
-`day-chart TICKER [--date ... | --start-date ... --end-date ...]` → `cli.resolve_session_date`
-(single day) or `cli.resolve_date_range` (either range flag given) → one `list[date]` → per-date
-injected `IntraDayProvider.fetch_bars` (real: `shared.providers.quant_data.QuantDataIntraDay`,
-wrapping a `quant_data.MarketData` read against the Postgres warehouse, tagging each bar via
+`day-chart TICKER [--date ... | --start-date ... --end-date ...] [--provider {ibkr,quant-data,yahoo}]`
+→ `cli._build_provider` (skipped if a `provider` was injected) selects `shared.providers.ibkr.IBKRIntraDay`
+(default), `shared.providers.quant_data.QuantDataIntraDay`, or
+`shared.providers.yahoo_finance.YahooFinanceIntraDay` from `Settings.ibkr`/`Settings.postgres`/
+nothing respectively → `cli.resolve_session_date` (single day) or `cli.resolve_date_range` (either
+range flag given, plus a 30-day cap check when the provider is `ibkr`) → one `list[date]` →
+per-date injected `IntraDayProvider.fetch_bars` (real, `ibkr`: `IBKRIntraDay`, a connect-per-call
+`ib_async` request against a local IB Gateway/TWS instance; real, `quant-data`: `QuantDataIntraDay`,
+wrapping a `quant_data.MarketData` read against the Postgres warehouse; real, `yahoo`:
+`YahooFinanceIntraDay`, a direct `yfinance` network call; all three tag each bar via
 `shared.sessions.infer_session`; test: `tests.mocks.quant_data.MockQuantDataIntraDay`, a fixture
 lookup) — in range mode, a per-day `AppError` is logged as a warning and that day dropped rather
 than failing the whole command — → `list[DayChartData]` (`(date, list[DayBar])` per charted day) →
@@ -358,13 +472,16 @@ conforms to, independent of which one is wired in.
 
 - `defs.protocols.StockQuote` — pure data, no behavior; the CSV formatting in `stock_quote/output.py`
   operates on it rather than living on the dataclass itself.
-- `defs.contracts.YahooFinanceProvider` — behavioral interface implemented by both
-  `shared.providers.yahoo_finance.YahooFinance` (production) and `tests.mocks.yahoo_finance.MockYahooFinance` (tests).
+- `defs.contracts.YahooFinanceProvider` — behavioral interface implemented by
+  `shared.providers.yahoo_finance.YahooFinance` (production, `stock-quote`'s default provider),
+  `shared.providers.ibkr.IBKRQuote` (production, selectable via `--provider ibkr`), and
+  `tests.mocks.yahoo_finance.MockYahooFinance` (tests).
 - `defs.protocols.DayBar` — pure data, no behavior; the CSV formatting in `day_chart/output.py` and
   the chart rendering in `day_chart/chart.py` both operate on it rather than living on the
   dataclass itself.
 - `defs.contracts.IntraDayProvider` — behavioral interface implemented by
-  `shared.providers.quant_data.QuantDataIntraDay` (production, wired into `day-chart`),
-  `shared.providers.ibkr.IBKRIntraDay` (a second implementation, validated standalone via
-  `ibkr_fetch.validate` but not yet wired into `day-chart`'s provider selection), and
+  `shared.providers.ibkr.IBKRIntraDay` (production, `day-chart`'s default provider),
+  `shared.providers.quant_data.QuantDataIntraDay` (production, selectable via `--provider
+  quant-data`), `shared.providers.yahoo_finance.YahooFinanceIntraDay` (production, selectable via
+  `--provider yahoo`, for source-vs-warehouse comparison), and
   `tests.mocks.quant_data.MockQuantDataIntraDay` (tests).
