@@ -20,9 +20,9 @@ call lifecycle, etc.) still broadly applies, just in a different repo.
 **Both halves of this brainstorm are now superseded by real work, 2026-08-02**: the `quant-scratch`
 CLI-provider path this file originally scoped went ahead anyway (as a from-source pipeline-
 validation/comparison tool, not a `day-chart` production dependency) — see
-[tasks/ibkr_fetch_historical_spy.md](ibkr_fetch_historical_spy.md) /
-[quant-scratch#11](https://github.com/croicu/quant-scratch/issues/11). The ingest-side path this
-note called out above is now tracked directly in quant-data:
+[quant-scratch#11](https://github.com/croicu/quant-scratch/issues/11) (closed; its task file was
+deleted per this repo's own workflow once the issue closed — the issue body/comments are now the
+record). The ingest-side path this note called out above is now tracked directly in quant-data:
 [croicu/quant-data#21](https://github.com/croicu/quant-data/issues/21). This file stays only as
 historical design context (other task files still link here for the session-inference-reuse/
 connect-per-call reasoning) — no longer an active brainstorm.
