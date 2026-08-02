@@ -30,12 +30,24 @@ class WindowSettings:
 
 
 @dataclass
+class IBKRSettings:
+    # Unlike PostgresSettings, every field already has a genuinely usable default (matching
+    # IBKRIntraDay's own constructor defaults for the one local paper-Gateway setup this repo
+    # targets) -- this section exists to override those defaults for a different setup, not
+    # because they need replacing, so no required-keys validation applies to it.
+    host: str = "127.0.0.1"
+    port: int = 4002
+    client_id: int = 1
+
+
+@dataclass
 class Settings:
     debug: bool
     logging: TelemetryLevel = TelemetryLevel.ERROR
     log_categories: list[str] = field(default_factory=list)
     excluded_categories: list[str] = field(default_factory=list)
     postgres: PostgresSettings | None = None
+    ibkr: IBKRSettings | None = None
     window: WindowSettings | None = None
 
     _instance: ClassVar[Settings | None] = None
@@ -136,6 +148,18 @@ class Settings:
                 ssh_key_path=None if ssh_key_path is None else str(ssh_key_path),
             )
 
+        ibkr_settings: IBKRSettings | None = None
+        ibkr_payload = settings_payload.get("ibkr")
+        if ibkr_payload is not None:
+            if not isinstance(ibkr_payload, dict):
+                raise TaskError("'settings.ibkr' must be a JSON object.")
+            default_ibkr = IBKRSettings()
+            ibkr_settings = IBKRSettings(
+                host=str(ibkr_payload.get("host", default_ibkr.host)),
+                port=int(ibkr_payload.get("port", default_ibkr.port)),
+                client_id=int(ibkr_payload.get("clientId", default_ibkr.client_id)),
+            )
+
         window_settings: WindowSettings | None = None
         window_payload = settings_payload.get("window")
         if window_payload is not None:
@@ -155,6 +179,7 @@ class Settings:
             log_categories=log_categories,
             excluded_categories=excluded_categories,
             postgres=postgres_settings,
+            ibkr=ibkr_settings,
             window=window_settings,
         )
 

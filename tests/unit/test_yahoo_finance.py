@@ -26,6 +26,7 @@ def test_fetch_quote_returns_stock_quote(monkeypatch):
     assert quote.ticker == "AAPL"
     assert quote.price == 150.25
     assert quote.volume == 1_000_000
+    assert quote.provider == "yahoo"
     assert quote.timestamp
 
 

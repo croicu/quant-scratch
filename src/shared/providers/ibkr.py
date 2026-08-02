@@ -1,21 +1,29 @@
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from datetime import time as time_of_day
 
 from ib_async import IB, Stock
+from ib_async.ib import StartupFetch
 
-from defs.protocols import DayBar
+from defs.protocols import DayBar, StockQuote
 
 from ..diagnostics import Logger
 from ..errors import AppError
 from ..sessions import EASTERN, infer_session
 
 CATEGORY_INTRADAY_FETCH = "intraday_fetch"
+CATEGORY_QUOTE_FETCH = "quote_fetch"
+
+PROVIDER_NAME = "ibkr"
 
 _AFTER_MARKET_CLOSE = time_of_day(20, 0)
+
+_MARKET_DATA_TYPE_LIVE = 1
+_MARKET_DATA_TYPE_DELAYED = 3
 
 
 class IBKRIntraDay:
@@ -48,7 +56,13 @@ class IBKRIntraDay:
         ib = self._client_factory()
         connect_start = time.perf_counter()
         try:
-            ib.connect(self._host, self._port, clientId=self._client_id, timeout=self._timeout)
+            # fetchFields=StartupFetch(0): connect()'s default startup fetch (positions/orders/
+            # account updates) needs write-level API access, which a Read-Only API Gateway (the
+            # sensible setting for a data-only tool with no trading involved) rejects -- surfaced
+            # as noisy stdout warnings and a Gateway popup on every connect. This provider only
+            # ever calls reqHistoricalData (unaffected either way), so there's nothing to fetch at
+            # startup in the first place.
+            ib.connect(self._host, self._port, clientId=self._client_id, timeout=self._timeout, fetchFields=StartupFetch(0))
             Logger.perf(f"connected to IBKR at {self._host}:{self._port}", time.perf_counter() - connect_start)
 
             ib.qualifyContracts(contract)
@@ -90,3 +104,64 @@ class IBKRIntraDay:
             category=CATEGORY_INTRADAY_FETCH,
         )
         return bars
+
+
+class IBKRQuote:
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 4002,
+        client_id: int = 1,
+        timeout: float = 10,
+        client_factory: Callable[[], IB] | None = None,
+    ) -> None:
+        self._host = host
+        self._port = port
+        self._client_id = client_id
+        self._timeout = timeout
+        self._client_factory = IB if client_factory is None else client_factory
+
+    def fetch_quote(self, ticker: str) -> StockQuote:
+        normalized_ticker = ticker.upper()
+        contract = Stock(normalized_ticker, "SMART", "USD")
+
+        ib = self._client_factory()
+        connect_start = time.perf_counter()
+        try:
+            ib.connect(self._host, self._port, clientId=self._client_id, timeout=self._timeout, fetchFields=StartupFetch(0))
+            Logger.perf(f"connected to IBKR at {self._host}:{self._port}", time.perf_counter() - connect_start)
+
+            ib.qualifyContracts(contract)
+            ticker_data = ib.reqTickers(contract)[0]
+            if math.isnan(ticker_data.last):
+                # No live entitlement for this account/contract (confirmed empirically -- see
+                # tasks/stock_quote_ibkr_integration.md): the live request comes back with every
+                # field NaN, no automatic fallback. Request delayed data explicitly and retry --
+                # an account that *does* have live entitlement never reaches this branch.
+                ib.reqMarketDataType(_MARKET_DATA_TYPE_DELAYED)
+                ticker_data = ib.reqTickers(contract)[0]
+        except Exception as error:
+            raise AppError(f"Failed to fetch quote for '{normalized_ticker}' from IBKR: {error}") from error
+        finally:
+            ib.disconnect()
+
+        if math.isnan(ticker_data.last):
+            raise AppError(f"No quote data available for '{normalized_ticker}' from IBKR.")
+
+        volume = 0 if math.isnan(ticker_data.volume) else int(ticker_data.volume)
+        quote = StockQuote(
+            ticker=normalized_ticker,
+            price=float(ticker_data.last),
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            volume=volume,
+            provider=PROVIDER_NAME,
+            # Reflects what actually came back (ticker_data.marketDataType), not which branch ran
+            # above -- an entitled account requesting live data that happens to return 1 either way
+            # should report delayed=False even though the code path looks the same either way.
+            delayed=ticker_data.marketDataType != _MARKET_DATA_TYPE_LIVE,
+        )
+        Logger.info(
+            f"ibkr: fetched quote for {normalized_ticker} (delayed={quote.delayed}).",
+            category=CATEGORY_QUOTE_FETCH,
+        )
+        return quote

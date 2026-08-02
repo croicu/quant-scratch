@@ -16,6 +16,8 @@ class StockQuote:
     price: float
     timestamp: str
     volume: int
+    provider: str  # which provider supplied this quote, e.g. "yahoo" or "ibkr"
+    delayed: bool = False  # True if the provider could only supply delayed (not real-time) data
 
 
 @dataclass

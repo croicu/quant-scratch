@@ -58,6 +58,51 @@ def test_load_postgres_with_only_ssh_key_path_raises(tmp_path):
         Settings.load(path=settings_path, local_path=tmp_path / "settings.local.json")
 
 
+def test_load_without_ibkr_section_defaults_to_none(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({"settings": {"debug": False}}), encoding="utf-8")
+
+    settings = Settings.load(path=settings_path, local_path=tmp_path / "settings.local.json")
+
+    assert settings.ibkr is None
+
+
+def test_load_empty_ibkr_section_uses_all_defaults(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({"settings": {"ibkr": {}}}), encoding="utf-8")
+
+    settings = Settings.load(path=settings_path, local_path=tmp_path / "settings.local.json")
+
+    assert settings.ibkr.host == "127.0.0.1"
+    assert settings.ibkr.port == 4002
+    assert settings.ibkr.client_id == 1
+
+
+def test_load_ibkr_section_partial_override_defaults_remaining_fields(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({"settings": {"ibkr": {"port": 4001}}}), encoding="utf-8")
+
+    settings = Settings.load(path=settings_path, local_path=tmp_path / "settings.local.json")
+
+    assert settings.ibkr.host == "127.0.0.1"
+    assert settings.ibkr.port == 4001
+    assert settings.ibkr.client_id == 1
+
+
+def test_load_ibkr_section_fully_specified(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(
+        json.dumps({"settings": {"ibkr": {"host": "192.168.1.50", "port": 4001, "clientId": 7}}}),
+        encoding="utf-8",
+    )
+
+    settings = Settings.load(path=settings_path, local_path=tmp_path / "settings.local.json")
+
+    assert settings.ibkr.host == "192.168.1.50"
+    assert settings.ibkr.port == 4001
+    assert settings.ibkr.client_id == 7
+
+
 def test_load_without_window_section_defaults_to_none(tmp_path):
     settings_path = tmp_path / "settings.json"
     settings_path.write_text(json.dumps({"settings": {"debug": False}}), encoding="utf-8")

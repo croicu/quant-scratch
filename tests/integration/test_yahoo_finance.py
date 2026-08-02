@@ -13,4 +13,5 @@ def test_fetch_quote_returns_live_data_for_known_ticker():
     assert quote.ticker == "AAPL"
     assert quote.price > 0
     assert quote.volume >= 0
+    assert quote.provider == "yahoo"
     datetime.fromisoformat(quote.timestamp)

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from defs.protocols import StockQuote
 from shared.errors import AppError
+from shared.providers.yahoo_finance import PROVIDER_NAME
 
 DEFAULT_DATA_PATH = Path(__file__).parent.parent / "data" / "yahoo_finance_quotes.json"
 
@@ -27,4 +28,5 @@ class MockYahooFinance:
             price=float(quote_data["price"]),
             timestamp=datetime.now(timezone.utc).isoformat(),
             volume=int(quote_data["volume"]),
+            provider=PROVIDER_NAME,
         )

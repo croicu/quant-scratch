@@ -4,6 +4,7 @@ from datetime import date, datetime, timezone
 
 import pytest
 from ib_async import BarData
+from ib_async.ib import StartupFetch
 
 from defs.protocols import DayBar
 from shared.errors import AppError
@@ -19,8 +20,9 @@ class FakeIB:
         self.qualified_contract = None
         self.historical_data_kwargs: dict | None = None
 
-    def connect(self, host, port, clientId, timeout):
+    def connect(self, host, port, clientId, timeout, fetchFields=None):
         self.connect_args = (host, port, clientId, timeout)
+        self.connect_fetch_fields = fetchFields
 
     def disconnect(self):
         self.disconnect_called = True
@@ -93,6 +95,18 @@ def test_fetch_bars_connects_and_disconnects_with_given_connection_details():
     assert fake_ib.disconnect_called is True
 
 
+def test_fetch_bars_skips_startup_account_fetch_to_avoid_read_only_api_rejection():
+    # connect()'s default startup fetch (positions/orders/account updates) needs write-level API
+    # access, which a Read-Only API Gateway rejects -- this provider never uses any of that, only
+    # reqHistoricalData, so it should request an empty StartupFetch rather than the library default.
+    fake_ib = FakeIB(bars=[BarData(date=datetime(2026, 7, 31, 14, 30, tzinfo=timezone.utc), open=1, high=1, low=1, close=1, volume=1)])
+    provider = IBKRIntraDay(client_factory=lambda: fake_ib)
+
+    provider.fetch_bars("SPY", date(2026, 7, 31))
+
+    assert fake_ib.connect_fetch_fields == StartupFetch(0)
+
+
 def test_fetch_bars_disconnects_even_when_request_fails():
     fake_ib = FakeIB(error=RuntimeError("connection reset"))
     provider = IBKRIntraDay(client_factory=lambda: fake_ib)
@@ -112,7 +126,7 @@ def test_fetch_bars_raises_on_empty_result():
 
 def test_fetch_bars_raises_on_connect_error():
     class RaisingConnectIB(FakeIB):
-        def connect(self, host, port, clientId, timeout):
+        def connect(self, host, port, clientId, timeout, fetchFields=None):
             raise ConnectionRefusedError("no gateway running")
 
     provider = IBKRIntraDay(client_factory=lambda: RaisingConnectIB())

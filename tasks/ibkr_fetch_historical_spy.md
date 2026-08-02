@@ -87,16 +87,19 @@ after-market: 240 bars, 20 with zero volume
   regular/extended-hours requests needed (an open question in the original brainstorm).
 - Connection took ~10s (`ib.connect()` including `ib_async`'s default startup account-state
   fetch); `reqHistoricalData` itself was fast once connected.
-- **Quirk**: `ib_async` prints `"open orders request timed out"` / `"completed orders request
-  timed out"` directly to stdout (not through this repo's `Logger`) during `connect()`. Confirmed
-  against the Gateway's own log (screenshot captured mid-run, not retained): the real cause is
-  `"Error validating request... The API interface is currently in Read-Only mode"` — the Gateway's
-  API is configured read-only (reasonable for a data-only paper account, prevents accidental order
-  placement), which rejects `ib_async`'s default startup order/position-state fetch; `ib_async`
-  reports the rejection as a timeout rather than surfacing the rejection reason directly. Unrelated
-  to and harmless for historical-bar fetching (that request isn't order/position-related and still
-  succeeds); could be silenced later by passing a narrower `fetchFields` to `connect()` if the
-  noise becomes annoying.
+- **Quirk (fixed 2026-08-02)**: `ib_async` printed `"open orders request timed out"` / `"completed
+  orders request timed out"` directly to stdout (not through this repo's `Logger`) during
+  `connect()`, plus a "needs API write access" Gateway popup. Confirmed against the Gateway's own
+  log (screenshot captured mid-run, not retained): the real cause was `"Error validating
+  request... The API interface is currently in Read-Only mode"` — the Gateway's API is configured
+  read-only (reasonable for a data-only paper account, prevents accidental order placement), which
+  rejected `ib_async`'s default startup order/position-state fetch; `ib_async` reported the
+  rejection as a timeout rather than surfacing the rejection reason directly. Was always unrelated
+  to and harmless for historical-bar fetching itself (that request isn't order/position-related and
+  always succeeded regardless) — now silenced by passing `fetchFields=StartupFetch(0)` to
+  `connect()` (`shared/providers/ibkr.py`), since this provider never needs that startup fetch in
+  the first place. Incidentally dropped connection time from ~10s to under 10ms — that startup
+  fetch (waiting to time out) was the actual cost, not the connection itself.
 - Historical Data Farm showed "Inactive" in the Gateway's own status panel before this run, and
   "ON: ushmds" during/after it — confirms that was just a lazy-connect state, not a real blocker.
 - Confirmed empirically (not from IBKR docs): the Gateway was listening on port **4002**
