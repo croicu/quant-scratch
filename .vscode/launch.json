@@ -29,6 +29,15 @@
       "justMyCode": false
     },
     {
+      "name": "Python: Run day-chart (CLI, start date, end date)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "day_chart.cli",
+      "args": ["${input:ticker}", "--provider", "quant-data", "--start-date", "${input:startDate}", "--end-date", "${input:endDate}"],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
       "name": "Python: Run Unit Tests",
       "type": "debugpy",
       "request": "launch",
@@ -67,7 +76,13 @@
       "id": "startDate",
       "type": "promptString",
       "description": "Range start date (YYYY-MM-DD) -- end defaults to today (or the last trading day if today is a weekend), giving a 7-day range with the default below",
-      "default": "2026-07-27"
+      "default": "2026-07-28"
+    },
+    {
+      "id": "endDate",
+      "type": "promptString",
+      "description": "Range end date (YYYY-MM-DD)",
+      "default": "2026-07-30"
     }
   ]
 }

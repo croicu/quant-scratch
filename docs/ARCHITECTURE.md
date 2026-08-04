@@ -31,8 +31,19 @@ rather than something provider-specific.
   live-quote analogue of `DayBar.incomplete`: `True` when a provider could only supply delayed (not
   real-time) data. `YahooFinance`/`MockYahooFinance` never set it (stays the dataclass default
   `False` — Yahoo's `fast_info` has no comparable live/delayed distinction surfaced today).
+  `ProviderBar` (`provider: str`, `bar: DayBar`) and `BarConflict` (`field_group: str`,
+  `whistleblower: ProviderBar`, `candidates: list[ProviderBar]`) represent quant-reconcile's
+  "stuck" queue — bars where providers disagree beyond tolerance
+  ([croicu/quant-scratch#15](https://github.com/croicu/quant-scratch/issues/15)). Deliberately
+  *not* a `DayBar` field: a conflict is inherently multi-valued (several providers' competing
+  values for one bar) and only exists for `quant-data` — `IBKRIntraDay`/`YahooFinanceIntraDay` have
+  no equivalent concept, so it isn't part of `IntraDayProvider`'s shared interface either.
+  `candidates` is a list (not a single field) because `dim_provider` isn't hardcoded to exactly one
+  candidate, even though today's real data is always exactly one.
 - `contracts.py` — behavioral interfaces: `YahooFinanceProvider(Protocol)` — `fetch_quote(ticker) -> StockQuote`;
-  `IntraDayProvider(Protocol)` — `fetch_bars(ticker, target_date) -> list[DayBar]`
+  `IntraDayProvider(Protocol)` — `fetch_bars(ticker, target_date) -> list[DayBar]`. `BarConflict`
+  fetching (`QuantDataIntraDay.fetch_conflicts`) is *not* part of this protocol — see its own note
+  below for why.
 
 ### `shared` — shared framework + default implementations
 
@@ -180,6 +191,20 @@ and has no CLI/console script of its own.
     directly was pure duplication once the warehouse existed. Constructor accepts an injected
     `client` for tests, matching this repo's DI-over-monkeypatching convention for testing
     dependencies on third-party/cross-repo code.
+
+    Also `fetch_conflicts(ticker, start_date, end_date) -> list[BarConflict]` — a second public
+    method, *not* part of `IntraDayProvider` (only `quant-data` has a reconciliation concept to
+    report a conflict from). Wraps `MarketData.fetch_pending_resolution_bars`, which returns one
+    flat row per `(bar, field_group, provider)` — there's no grouping on the wire, so this groups
+    rows back into one `BarConflict` per disputed `(timestamp, field_group)`, partitions each
+    group by `PendingResolutionBar.role` (`quant_data.ProviderRole.WHISTLEBLOWER`/`.CANDIDATE`),
+    and raises `AppError` if a group doesn't have exactly one whistleblower or has zero candidates
+    — an unexpected shape worth surfacing loudly, not silently guessing at (mirrors the existing
+    `fetch_bars` philosophy for out-of-window bars). An **empty** result is *not* an error, unlike
+    `fetch_bars` — no disputes is the normal case. `day_chart.cli` calls this once for a chart's
+    whole resolved date range (not per-day), only when `--provider quant-data` is selected — a
+    silent no-op for `ibkr`/`yahoo`, which have nothing to dispute against. The `OHLCV` → `DayBar`
+    conversion (`_ohlcv_to_daybar`) is factored out and shared with `fetch_bars`.
   - `ibkr.py` -- `IBKRIntraDay`, another `defs.contracts.IntraDayProvider` implementation, wrapping
     [`ib_async`](https://github.com/ib-api-reloaded/ib_async) (the actively-maintained community
     fork of the archived `ib_insync`) against a local IB Gateway/TWS instance. Built for
@@ -270,13 +295,16 @@ Fetches and prints the current quote for a single stock ticker. Depends on `defs
 
 Fetches full-day intraday bars for one or more days for a single stock ticker and generates a
 price/volume chart plus a CSV export. Depends on `defs` for the `IntraDayProvider` interface and
-`DayBar` data type, and on `shared` for the default `QuantDataIntraDay` implementation plus
-`Settings`/`Logger`/`AppError`. No dependency on `quant_data` or `matplotlib.pyplot` outside its own
-`chart.py`/`shared/providers/` — bar fetching is confined to `shared/providers/quant_data.py`.
+`DayBar`/`BarConflict` data types, and on `shared` for the default `QuantDataIntraDay`
+implementation plus `Settings`/`Logger`/`AppError`. No dependency on `quant_data` or
+`matplotlib.pyplot` outside its own `chart.py`/`shared/providers/` — bar (and conflict) fetching is
+confined to `shared/providers/quant_data.py`.
 
-- `output.py` — `bars_to_csv(bars) -> str`; columns include `incomplete`
+- `output.py` — `bars_to_csv(bars) -> str`; columns include `incomplete`. No `BarConflict` export —
+  the pending-resolution display is chart-only by design, `bars_to_csv`/`CSV_HEADERS` untouched.
 - `chart.py` — `DayChartData = tuple[date, list[DayBar]]` (one day's session date + its bars).
-  `render_chart(ticker, days: list[DayChartData]) -> Figure`; pure figure construction, a 2×N grid
+  `render_chart(ticker, days: list[DayChartData], conflicts: list[BarConflict] | None = None) ->
+  Figure`; pure figure construction, a 2×N grid
   (N = `len(days)`) built via a single `plt.subplots(2, N, sharex="col", squeeze=False,
   dpi=100, gridspec_kw={"height_ratios": [3, 1]}, layout="constrained")` — `sharex="col"` links each
   day's own price/volume pair without linking across days (each day gets its own
@@ -292,7 +320,28 @@ price/volume chart plus a CSV export. Depends on `defs` for the `IntraDayProvide
   y-axes ("Price"/"Volume"), to avoid repeating them across every panel. Each subplot still shades
   by session via `axvspan`. Raises `AppError` for an empty `days` list. Runs under the `Agg` backend
   (module default) so it's headless-safe in tests/CI. Doesn't currently do anything visually
-  distinct for `incomplete` bars — carried through the data only for now. `show_chart(ticker, days)`
+  distinct for `incomplete` bars — carried through the data only for now.
+
+  `conflicts` (default `None`, treated as empty — existing 2-arg callers are unaffected) draws one
+  candlestick per `ProviderBar` in each `BarConflict`, on whichever day column matches the
+  conflict's own (ET) date: red for the `whistleblower`, blue for each `candidates` entry
+  (`_draw_conflict`/`_draw_candlestick`). The whistleblower candle sits at the conflict's real
+  timestamp (lines up with the existing close-price line); candidate candles fan out to its right,
+  offset per candidate (`_CANDLE_OFFSET_DAYS`) so multiple candidates (possible, even though
+  today's real data is always exactly one) stay visually distinct instead of fully overlapping.
+  Colors and each candle's own real OHLC values, not a derived envelope — resolved a real design
+  ambiguity (a conflict holds *two* competing bars; which one's values to plot?) by having
+  `PendingResolutionBar.role` on the quant-data side, so each candle can just render its own
+  provider's actual numbers. Each candle is a wick (`axis.plot`, a vertical low-to-high line) plus
+  a body (`matplotlib.patches.Rectangle`, open-to-close, tagged `gid=_CONFLICT_CANDLE_GID` since
+  `axvspan`'s session shading is *also* implemented with `Rectangle` patches internally — a plain
+  `isinstance` check can't tell them apart, discovered when early candlestick-count tests found
+  extra patches). First candlestick rendering in this module — the regular chart is a close-price
+  line only, unaffected. This is `quant-data`-only in practice (`day_chart.cli` never passes
+  conflicts for `ibkr`/`yahoo`), but `chart.py` itself has no such gating — it just draws whatever
+  it's given.
+
+  `show_chart(ticker, days, conflicts=None)`
   is the interactive entry point: switches to the `TkAgg` backend, calls `render_chart`, shows the
   figure non-blocking (`plt.show(block=False)`), registers a `close_event` callback on
   `figure.canvas` that flips a flag, then polls the GUI event loop itself
@@ -349,7 +398,7 @@ price/volume chart plus a CSV export. Depends on `defs` for the `IntraDayProvide
   ever touching a GUI backend.
 - `cli.py` — `day-chart` entry point; `main()` takes optional `provider: IntraDayProvider`,
   `settings_path: Path`, `output_dir: Path`, and `show_chart: ShowChartFn` (`Callable[[str,
-  list[DayChartData]], None]`) parameters — same parameter-based DI pattern as `stock_quote.cli`
+  list[DayChartData], list[BarConflict]], None]`) parameters — same parameter-based DI pattern as `stock_quote.cli`
   (tests inject a non-GUI stand-in for `show_chart`, same reason `provider` is injected instead of
   hitting a real database/Gateway). `--provider {ibkr,quant-data,yahoo}` (default `ibkr`) selects
   which data source backs the default construction path — a real behavior change from when
@@ -398,7 +447,15 @@ price/volume chart plus a CSV export. Depends on `defs` for the `IntraDayProvide
   fetch failure still propagates directly as before (unchanged). The CSV export flattens all
   charted days' bars into one file — `<TICKER>_<DATE>_data.csv` for a single day,
   `<TICKER>_<START>_<END>_data.csv` (the requested range's bounds, not just the days that actually
-  had data) for a range.
+  had data) for a range. When `--provider quant-data` is selected, `main()` also calls
+  `active_provider.fetch_conflicts(ticker, ...)` — once for the whole resolved date range (single
+  day or range mode both pass through the same call, since `fetch_conflicts` already accepts a
+  range), *always*, no separate opt-in flag — and threads the result through to `show_chart` as its
+  third argument. A silent no-op (`conflicts = []`) for `ibkr`/`yahoo`: nothing to dispute for a
+  raw single-source fetch. `fetch_conflicts` isn't part of `IntraDayProvider`, so this call is
+  gated on `arguments.provider == PROVIDER_QUANT_DATA` (the flag), not on the injected/constructed
+  provider's type — consistent with how the `ibkr` range cap above is also gated on the flag rather
+  than an `isinstance` check ([issue #15](https://github.com/croicu/quant-scratch/issues/15)).
 
 ### Test doubles (`tests/`)
 
@@ -414,7 +471,11 @@ price/volume chart plus a CSV export. Depends on `defs` for the `IntraDayProvide
   the real `QuantDataIntraDay`. Note this mocks quant-scratch's own `IntraDayProvider` shape
   end-to-end (for `day_chart` CLI-level tests) — it's a different, lower-level thing from
   `tests/unit/test_quant_data_provider.py`'s `FakeMarketData`, which mocks quant-data's
-  `MarketData` client specifically to unit-test `QuantDataIntraDay`'s own conversion logic.
+  `MarketData` client specifically to unit-test `QuantDataIntraDay`'s own conversion logic. Also
+  has `fetch_conflicts(ticker, start_date, end_date) -> list[BarConflict]`, always returning `[]` —
+  no fixture data for conflicts yet, since CLI-level tests only need the method to exist (`main()`
+  always calls it for `--provider quant-data`); the real grouping/role-partitioning/validation
+  logic is covered directly against `QuantDataIntraDay` in `test_quant_data_provider.py` instead.
 - `tests/data/settings.json` — fixture settings file, DI'd into `Settings.load(path=...)` via
   `stock_quote.cli.main`'s (and `day_chart.cli.main`'s) `settings_path` parameter, so CLI tests
   don't depend on cwd isolation. Deliberately has no `postgres` section — exercises the "missing
@@ -455,11 +516,14 @@ wrapping a `quant_data.MarketData` read against the Postgres warehouse; real, `y
 `YahooFinanceIntraDay`, a direct `yfinance` network call; all three tag each bar via
 `shared.sessions.infer_session`; test: `tests.mocks.quant_data.MockQuantDataIntraDay`, a fixture
 lookup) — in range mode, a per-day `AppError` is logged as a warning and that day dropped rather
-than failing the whole command — → `list[DayChartData]` (`(date, list[DayBar])` per charted day) →
-both injected `show_chart` (real: `chart.show_chart`, a blocking popup window; test: a non-GUI
-stand-in) and, after flattening every charted day's bars into one list, `output.bars_to_csv` (→
-`<TICKER>_<DATE>_data.csv` for a single day, `<TICKER>_<START>_<END>_data.csv` for a range; written
-to `output_dir`, CWD by default).
+than failing the whole command — → `list[DayChartData]` (`(date, list[DayBar])` per charted day).
+When `--provider quant-data`, also → `QuantDataIntraDay.fetch_conflicts` (once for the whole
+resolved range; silent no-op → `[]` for `ibkr`/`yahoo`) → `list[BarConflict]`. Both → injected
+`show_chart` (real: `chart.show_chart`, a blocking popup window rendering red/blue candlesticks for
+any conflicts; test: a non-GUI stand-in) and, after flattening every charted day's bars into one
+list, `output.bars_to_csv` (→ `<TICKER>_<DATE>_data.csv` for a single day,
+`<TICKER>_<START>_<END>_data.csv` for a range; written to `output_dir`, CWD by default —
+`BarConflict` data never reaches the CSV, chart-only by design).
 
 ## Contracts
 
@@ -485,3 +549,8 @@ conforms to, independent of which one is wired in.
   quant-data`), `shared.providers.yahoo_finance.YahooFinanceIntraDay` (production, selectable via
   `--provider yahoo`, for source-vs-warehouse comparison), and
   `tests.mocks.quant_data.MockQuantDataIntraDay` (tests).
+- `defs.protocols.ProviderBar`/`BarConflict` — pure data, no behavior; grouped/produced by
+  `QuantDataIntraDay.fetch_conflicts` and rendered (candlesticks) by `day_chart/chart.py`. Not part
+  of `IntraDayProvider` — no behavioral interface governs these, since only `QuantDataIntraDay`
+  has a reconciliation concept to report a conflict from; `IBKRIntraDay`/`YahooFinanceIntraDay`
+  have no equivalent method at all, not an empty/stub one.

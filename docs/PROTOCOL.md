@@ -86,6 +86,11 @@ CLI signature and file format schemas for `quant-scratch`.
   required settings / connection error, `2` argument parsing error (argparse's default behavior on
   missing/bad args).
 - On success, prints the written CSV path to stdout (after you press Enter to close the popup).
+- **`--provider quant-data` only**: always (no separate flag) also fetches quant-reconcile's
+  pending-resolution ("stuck") bars for the charted range and draws them on the popup as
+  candlesticks — red for the whistleblower provider's own OHLC values, blue for each candidate
+  provider's own OHLC values (see the popup section below). A silent no-op for `ibkr`/`yahoo` —
+  nothing to dispute for a raw single-source fetch. Never written to the CSV export.
 
 ### Settings: `ibkr` section (`settings.json` / `settings.local.json`)
 
@@ -247,7 +252,13 @@ timeline), a shared ticker title above the whole figure, and each day's own date
 title. Only the leftmost day's panels are y-axis labeled ("Price"/"Volume"), to avoid repeating
 labels across every panel. Each subplot shades its background by session (pre-market / regular /
 after-market) using `axvspan`. Doesn't currently render `incomplete` visually — that information is
-only in the CSV/`DayBar` data for now.
+only in the CSV/`DayBar` data for now. For `--provider quant-data`, each price panel also draws a
+candlestick per disputed bar that falls on that panel's day (see the CLI section above): one red
+candlestick using the whistleblower provider's own OHLC values, plus one blue candlestick per
+candidate provider using that candidate's own OHLC values — each candle plots its provider's real
+numbers directly, not a derived/combined value. The whistleblower candle sits at the bar's actual
+timestamp; candidate candles are offset slightly to its right so multiple candidates (rare today,
+but possible) stay visually distinct rather than fully overlapping.
 
 ### Mock intraday bars fixture (`tests/data/quant_data_bars.json`)
 
