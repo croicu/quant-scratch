@@ -30,3 +30,20 @@ class DayBar:
     volume: int
     session: str  # "pre-market", "regular", or "after-market"
     incomplete: bool = False  # provider couldn't supply full data for this bar (e.g. missing volume)
+
+
+@dataclass
+class ProviderBar:
+    provider: str
+    bar: DayBar
+
+
+@dataclass
+class BarConflict:
+    # quant-data's reconciliation "stuck" queue: providers disagree on this field group for this
+    # minute beyond tolerance, awaiting --finalize or manual correction. Not a DayBar itself, and
+    # not part of IntraDayProvider's shared interface -- only quant-data has a reconciliation
+    # concept to report a conflict from in the first place.
+    field_group: str
+    whistleblower: ProviderBar
+    candidates: list[ProviderBar]  # usually one today, but plurality is possible -- never assume exactly one

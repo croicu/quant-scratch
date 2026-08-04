@@ -3,9 +3,9 @@ from __future__ import annotations
 import time
 from datetime import date, datetime, timezone
 
-from quant_data import MarketData, create_postgres_provider
+from quant_data import OHLCV, MarketData, PendingResolutionBar, ProviderRole, create_postgres_provider
 
-from defs.protocols import DayBar
+from defs.protocols import BarConflict, DayBar, ProviderBar
 
 from ..diagnostics import Logger
 from ..errors import AppError
@@ -24,6 +24,20 @@ def _ensure_utc(timestamp: datetime) -> datetime:
     if timestamp.tzinfo is None:
         return timestamp.replace(tzinfo=timezone.utc)
     return timestamp.astimezone(timezone.utc)
+
+
+def _ohlcv_to_daybar(ohlcv: OHLCV) -> DayBar:
+    timestamp_utc = _ensure_utc(ohlcv.timestamp)
+    return DayBar(
+        timestamp=timestamp_utc,
+        open=ohlcv.open,
+        high=ohlcv.high,
+        low=ohlcv.low,
+        close=ohlcv.close,
+        volume=ohlcv.volume,
+        session=infer_session(timestamp_utc),
+        incomplete=ohlcv.incomplete,
+    )
 
 
 class QuantDataIntraDay:
@@ -83,21 +97,71 @@ class QuantDataIntraDay:
 
         bars: list[DayBar] = []
         for ohlcv in ohlcv_bars:
-            timestamp_utc = _ensure_utc(ohlcv.timestamp)
-            bar = DayBar(
-                timestamp=timestamp_utc,
-                open=ohlcv.open,
-                high=ohlcv.high,
-                low=ohlcv.low,
-                close=ohlcv.close,
-                volume=ohlcv.volume,
-                session=infer_session(timestamp_utc),
-                incomplete=ohlcv.incomplete,
-            )
-            bars.append(bar)
+            bars.append(_ohlcv_to_daybar(ohlcv))
 
         Logger.info(
             f"day-chart: fetched {len(bars)} intraday bars for {normalized_ticker} on {target_date.isoformat()} from quant-data.",
             category=CATEGORY_INTRADAY_FETCH,
         )
         return bars
+
+    def fetch_conflicts(self, ticker: str, start_date: date, end_date: date) -> list[BarConflict]:
+        normalized_ticker = ticker.upper()
+
+        try:
+            # No perf wrapper here, same reasoning as fetch_bars above.
+            pending_bars = self._client.fetch_pending_resolution_bars(normalized_ticker, start_date, end_date)
+        except Exception as error:
+            raise AppError(
+                f"Failed to fetch pending-resolution bars for '{normalized_ticker}' between "
+                f"{start_date.isoformat()} and {end_date.isoformat()} from quant-data: {error}"
+            ) from error
+
+        # Group quant-data's flat (bar, field_group, provider) rows back into one conflict per
+        # disputed (timestamp, field_group) -- there's no such grouping on the wire, each row is
+        # independent.
+        grouped: dict[tuple[datetime, str], list[PendingResolutionBar]] = {}
+        for pending_bar in pending_bars:
+            timestamp_utc = _ensure_utc(pending_bar.bar.timestamp)
+            group_key = (timestamp_utc, pending_bar.field_group)
+            if group_key not in grouped:
+                grouped[group_key] = []
+            grouped[group_key].append(pending_bar)
+
+        conflicts: list[BarConflict] = []
+        for (timestamp_utc, field_group), entries in grouped.items():
+            whistleblower_entries: list[PendingResolutionBar] = []
+            candidate_entries: list[PendingResolutionBar] = []
+            for entry in entries:
+                if entry.role == ProviderRole.WHISTLEBLOWER:
+                    whistleblower_entries.append(entry)
+                elif entry.role == ProviderRole.CANDIDATE:
+                    candidate_entries.append(entry)
+
+            # Hard failure rather than a silent guess -- an unexpected shape here means either a
+            # quant-data-side bug or an assumption in this grouping that no longer holds, not
+            # something to paper over. dim_provider isn't hardcoded to exactly one candidate, but
+            # exactly one whistleblower is a real invariant of what "stuck" means for a bar.
+            if len(whistleblower_entries) != 1:
+                raise AppError(
+                    f"Expected exactly one whistleblower for '{normalized_ticker}' {field_group} at "
+                    f"{timestamp_utc.isoformat()}, got {len(whistleblower_entries)}."
+                )
+            if not candidate_entries:
+                raise AppError(f"Expected at least one candidate for '{normalized_ticker}' {field_group} at {timestamp_utc.isoformat()}, got none.")
+
+            whistleblower_entry = whistleblower_entries[0]
+            whistleblower_bar = ProviderBar(provider=whistleblower_entry.provider, bar=_ohlcv_to_daybar(whistleblower_entry.bar))
+
+            candidate_bars: list[ProviderBar] = []
+            for candidate_entry in candidate_entries:
+                candidate_bars.append(ProviderBar(provider=candidate_entry.provider, bar=_ohlcv_to_daybar(candidate_entry.bar)))
+
+            conflicts.append(BarConflict(field_group=field_group, whistleblower=whistleblower_bar, candidates=candidate_bars))
+
+        Logger.info(
+            f"day-chart: fetched {len(conflicts)} pending-resolution conflict(s) for {normalized_ticker} between "
+            f"{start_date.isoformat()} and {end_date.isoformat()} from quant-data.",
+            category=CATEGORY_INTRADAY_FETCH,
+        )
+        return conflicts

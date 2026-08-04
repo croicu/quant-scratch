@@ -3,9 +3,9 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 
 import pytest
-from quant_data import OHLCV
+from quant_data import OHLCV, PendingResolutionBar, ProviderRole
 
-from defs.protocols import DayBar
+from defs.protocols import BarConflict, DayBar
 from shared.diagnostics import Logger
 from shared.errors import AppError
 from shared.providers import quant_data as quant_data_module
@@ -13,16 +13,42 @@ from shared.providers.quant_data import QuantDataIntraDay
 
 
 class FakeMarketData:
-    def __init__(self, bars: list[OHLCV] | None = None, error: Exception | None = None):
+    def __init__(
+        self,
+        bars: list[OHLCV] | None = None,
+        pending_bars: list[PendingResolutionBar] | None = None,
+        error: Exception | None = None,
+    ):
         self._bars = bars if bars is not None else []
+        self._pending_bars = pending_bars if pending_bars is not None else []
         self._error = error
         self.requested: tuple[str, date, date] | None = None
+        self.pending_requested: tuple[str, date, date] | None = None
 
     def fetch_bars(self, ticker: str, start_date: date, end_date: date) -> list[OHLCV]:
         self.requested = (ticker, start_date, end_date)
         if self._error is not None:
             raise self._error
         return self._bars
+
+    def fetch_pending_resolution_bars(self, ticker: str, start_date: date, end_date: date) -> list[PendingResolutionBar]:
+        self.pending_requested = (ticker, start_date, end_date)
+        if self._error is not None:
+            raise self._error
+        return self._pending_bars
+
+
+def _ohlcv(hour_utc: int, minute_utc: int, close: float) -> OHLCV:
+    return OHLCV(
+        ticker="SPY",
+        timestamp=datetime(2026, 1, 2, hour_utc, minute_utc, tzinfo=timezone.utc),
+        open=close,
+        high=close,
+        low=close,
+        close=close,
+        volume=1000,
+        incomplete=False,
+    )
 
 
 def test_fetch_bars_converts_ohlcv_to_daybar_with_session_and_incomplete():
@@ -173,3 +199,110 @@ def test_constructor_forwards_ssh_kwargs_and_logger_to_create_postgres_provider(
     # internal timing/connection markers land in the same stream as ours instead of being invisible.
     assert captured_kwargs["logger"] is Logger
     assert captured_market_data_logger["logger"] is Logger
+
+
+def test_fetch_conflicts_groups_one_whistleblower_and_one_candidate():
+    pending_bars = [
+        PendingResolutionBar(field_group="ohlc", provider="yfinance", role=ProviderRole.WHISTLEBLOWER, bar=_ohlcv(14, 30, 100.0)),
+        PendingResolutionBar(field_group="ohlc", provider="ibkr", role=ProviderRole.CANDIDATE, bar=_ohlcv(14, 30, 100.5)),
+    ]
+    provider = QuantDataIntraDay(client=FakeMarketData(pending_bars=pending_bars))
+
+    conflicts = provider.fetch_conflicts("spy", date(2026, 1, 2), date(2026, 1, 2))
+
+    assert len(conflicts) == 1
+    conflict = conflicts[0]
+    assert isinstance(conflict, BarConflict)
+    assert conflict.field_group == "ohlc"
+    assert conflict.whistleblower.provider == "yfinance"
+    assert conflict.whistleblower.bar.close == 100.0
+    assert isinstance(conflict.whistleblower.bar, DayBar)
+    assert len(conflict.candidates) == 1
+    assert conflict.candidates[0].provider == "ibkr"
+    assert conflict.candidates[0].bar.close == 100.5
+
+
+def test_fetch_conflicts_groups_multiple_candidates_under_one_whistleblower():
+    pending_bars = [
+        PendingResolutionBar(field_group="ohlc", provider="yfinance", role=ProviderRole.WHISTLEBLOWER, bar=_ohlcv(14, 30, 100.0)),
+        PendingResolutionBar(field_group="ohlc", provider="ibkr", role=ProviderRole.CANDIDATE, bar=_ohlcv(14, 30, 100.5)),
+        PendingResolutionBar(field_group="ohlc", provider="databento", role=ProviderRole.CANDIDATE, bar=_ohlcv(14, 30, 100.7)),
+    ]
+    provider = QuantDataIntraDay(client=FakeMarketData(pending_bars=pending_bars))
+
+    conflicts = provider.fetch_conflicts("SPY", date(2026, 1, 2), date(2026, 1, 2))
+
+    assert len(conflicts) == 1
+    candidate_providers = []
+    for candidate in conflicts[0].candidates:
+        candidate_providers.append(candidate.provider)
+    assert sorted(candidate_providers) == ["databento", "ibkr"]
+
+
+def test_fetch_conflicts_separates_distinct_timestamps_and_field_groups():
+    pending_bars = [
+        PendingResolutionBar(field_group="ohlc", provider="yfinance", role=ProviderRole.WHISTLEBLOWER, bar=_ohlcv(14, 30, 100.0)),
+        PendingResolutionBar(field_group="ohlc", provider="ibkr", role=ProviderRole.CANDIDATE, bar=_ohlcv(14, 30, 100.5)),
+        PendingResolutionBar(field_group="ohlc", provider="yfinance", role=ProviderRole.WHISTLEBLOWER, bar=_ohlcv(14, 31, 101.0)),
+        PendingResolutionBar(field_group="ohlc", provider="ibkr", role=ProviderRole.CANDIDATE, bar=_ohlcv(14, 31, 101.5)),
+    ]
+    provider = QuantDataIntraDay(client=FakeMarketData(pending_bars=pending_bars))
+
+    conflicts = provider.fetch_conflicts("SPY", date(2026, 1, 2), date(2026, 1, 2))
+
+    assert len(conflicts) == 2
+
+
+def test_fetch_conflicts_raises_on_missing_whistleblower():
+    pending_bars = [
+        PendingResolutionBar(field_group="ohlc", provider="ibkr", role=ProviderRole.CANDIDATE, bar=_ohlcv(14, 30, 100.5)),
+    ]
+    provider = QuantDataIntraDay(client=FakeMarketData(pending_bars=pending_bars))
+
+    with pytest.raises(AppError):
+        provider.fetch_conflicts("SPY", date(2026, 1, 2), date(2026, 1, 2))
+
+
+def test_fetch_conflicts_raises_on_multiple_whistleblowers():
+    pending_bars = [
+        PendingResolutionBar(field_group="ohlc", provider="yfinance", role=ProviderRole.WHISTLEBLOWER, bar=_ohlcv(14, 30, 100.0)),
+        PendingResolutionBar(field_group="ohlc", provider="polygon", role=ProviderRole.WHISTLEBLOWER, bar=_ohlcv(14, 30, 100.2)),
+        PendingResolutionBar(field_group="ohlc", provider="ibkr", role=ProviderRole.CANDIDATE, bar=_ohlcv(14, 30, 100.5)),
+    ]
+    provider = QuantDataIntraDay(client=FakeMarketData(pending_bars=pending_bars))
+
+    with pytest.raises(AppError):
+        provider.fetch_conflicts("SPY", date(2026, 1, 2), date(2026, 1, 2))
+
+
+def test_fetch_conflicts_raises_on_missing_candidates():
+    pending_bars = [
+        PendingResolutionBar(field_group="ohlc", provider="yfinance", role=ProviderRole.WHISTLEBLOWER, bar=_ohlcv(14, 30, 100.0)),
+    ]
+    provider = QuantDataIntraDay(client=FakeMarketData(pending_bars=pending_bars))
+
+    with pytest.raises(AppError):
+        provider.fetch_conflicts("SPY", date(2026, 1, 2), date(2026, 1, 2))
+
+
+def test_fetch_conflicts_returns_empty_list_when_nothing_pending():
+    provider = QuantDataIntraDay(client=FakeMarketData(pending_bars=[]))
+
+    conflicts = provider.fetch_conflicts("SPY", date(2026, 1, 2), date(2026, 1, 2))
+
+    assert conflicts == []
+
+
+def test_fetch_conflicts_raises_on_client_error():
+    provider = QuantDataIntraDay(client=FakeMarketData(error=RuntimeError("connection reset")))
+
+    with pytest.raises(AppError):
+        provider.fetch_conflicts("SPY", date(2026, 1, 2), date(2026, 1, 2))
+
+
+def test_fetch_conflicts_requests_the_full_range():
+    fake_client = FakeMarketData(pending_bars=[])
+
+    QuantDataIntraDay(client=fake_client).fetch_conflicts("spy", date(2026, 1, 2), date(2026, 1, 5))
+
+    assert fake_client.pending_requested == ("SPY", date(2026, 1, 2), date(2026, 1, 5))

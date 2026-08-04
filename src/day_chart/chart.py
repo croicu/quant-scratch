@@ -11,8 +11,9 @@ matplotlib.use("Agg")
 import matplotlib.dates as mdates  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.figure import Figure  # noqa: E402
+from matplotlib.patches import Rectangle  # noqa: E402
 
-from defs.protocols import DayBar  # noqa: E402
+from defs.protocols import BarConflict, DayBar  # noqa: E402
 from shared.diagnostics import CATEGORY_PERF_UI, Logger  # noqa: E402
 from shared.errors import AppError  # noqa: E402
 from shared.sessions import AFTER_MARKET, EASTERN, PRE_MARKET, REGULAR  # noqa: E402
@@ -30,6 +31,12 @@ _FIGURE_DPI = 100
 _DAY_PADDING_PX = 5
 _EVENT_LOOP_POLL_SECONDS = 0.1
 _RESIZE_DEBOUNCE_MS = 200
+
+_WHISTLEBLOWER_COLOR = "#dc2626"
+_CANDIDATE_COLOR = "#2563eb"
+_CANDLE_WIDTH_DAYS = 0.6 / (24 * 60)  # narrower than a full minute, leaves a visible gap
+_CONFLICT_CANDLE_GID = "conflict-candle-body"
+_CANDLE_OFFSET_DAYS = 1.2 / (24 * 60)  # spacing between a whistleblower candle and each candidate
 
 # One day's worth of chart input: its session date plus that day's bars.
 DayChartData = tuple[date, list[DayBar]]
@@ -83,12 +90,12 @@ def _get_virtual_desktop_bounds(window) -> tuple[int, int, int, int]:
     return (0, 0, window.winfo_screenwidth(), window.winfo_screenheight())
 
 
-def show_chart(ticker: str, days: list[DayChartData]) -> None:
+def show_chart(ticker: str, days: list[DayChartData], conflicts: list[BarConflict] | None = None) -> None:
     switch_start = perf_counter()
     plt.switch_backend(_INTERACTIVE_BACKEND)
     Logger.perf(f"switched to {_INTERACTIVE_BACKEND} backend", perf_counter() - switch_start)
 
-    figure = render_chart(ticker, days)
+    figure = render_chart(ticker, days, conflicts)
     # None for any backend without a real GUI window (e.g. Agg, used in tests) -- window
     # positioning is a TkAgg-specific nicety, not something every backend needs to support.
     window = getattr(figure.canvas.manager, "window", None)
@@ -202,10 +209,11 @@ def show_chart(ticker: str, days: list[DayChartData]) -> None:
     plt.close(figure)
 
 
-def render_chart(ticker: str, days: list[DayChartData]) -> Figure:
+def render_chart(ticker: str, days: list[DayChartData], conflicts: list[BarConflict] | None = None) -> Figure:
     if not days:
         raise AppError(f"Cannot render chart for '{ticker}': no days provided.")
 
+    active_conflicts = [] if conflicts is None else conflicts
     render_start = perf_counter()
 
     figure, axes = plt.subplots(
@@ -248,6 +256,11 @@ def render_chart(ticker: str, days: list[DayChartData]) -> Figure:
         _shade_sessions(price_axis, timestamps_et, sessions)
         _shade_sessions(volume_axis, timestamps_et, sessions)
 
+        for conflict in active_conflicts:
+            conflict_timestamp_et = conflict.whistleblower.bar.timestamp.astimezone(EASTERN)
+            if conflict_timestamp_et.date() == session_date:
+                _draw_conflict(price_axis, conflict, conflict_timestamp_et)
+
         session_start = datetime.combine(session_date, time.min, tzinfo=EASTERN)
         session_end = session_start + timedelta(days=1)
         volume_axis.set_xlim(session_start, session_end)
@@ -256,6 +269,40 @@ def render_chart(ticker: str, days: list[DayChartData]) -> Figure:
     figure.autofmt_xdate()
     Logger.perf(f"rendered {len(days)} day(s)", perf_counter() - render_start)
     return figure
+
+
+def _draw_conflict(axis, conflict: BarConflict, timestamp_et: datetime) -> None:
+    # Whistleblower candle sits at the conflict's real timestamp (lines it up with the existing
+    # price line); candidate candles fan out to its right, offset per candidate so multiple
+    # candidates (possible, even if today's data is always exactly one) stay visually distinct
+    # rather than fully overlapping.
+    _draw_candlestick(axis, timestamp_et, conflict.whistleblower.bar, _WHISTLEBLOWER_COLOR)
+    for candidate_index, candidate in enumerate(conflict.candidates):
+        offset = timedelta(days=_CANDLE_OFFSET_DAYS * (candidate_index + 1))
+        _draw_candlestick(axis, timestamp_et + offset, candidate.bar, _CANDIDATE_COLOR)
+
+
+def _draw_candlestick(axis, timestamp_et: datetime, bar: DayBar, color: str) -> None:
+    axis.plot([timestamp_et, timestamp_et], [bar.low, bar.high], color=color, linewidth=1, zorder=3)
+
+    body_bottom = min(bar.open, bar.close)
+    body_height = abs(bar.close - bar.open)
+    if body_height == 0:
+        # A doji-like bar (open == close) would otherwise draw an invisible zero-height body --
+        # give it a thin sliver so the candle stays visible.
+        body_height = max((bar.high - bar.low) * 0.01, 0.01)
+
+    body = Rectangle(
+        (mdates.date2num(timestamp_et) - _CANDLE_WIDTH_DAYS / 2, body_bottom),
+        _CANDLE_WIDTH_DAYS,
+        body_height,
+        color=color,
+        zorder=3,
+        # axvspan (session shading) is itself implemented with Rectangle patches, so a plain
+        # isinstance(patch, Rectangle) check can't tell them apart -- gid tags this one as ours.
+        gid=_CONFLICT_CANDLE_GID,
+    )
+    axis.add_patch(body)
 
 
 def _shade_sessions(axis, timestamps_et: list[datetime], sessions: list[str]) -> None:

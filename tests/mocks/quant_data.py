@@ -4,7 +4,7 @@ import json
 from datetime import date, datetime
 from pathlib import Path
 
-from defs.protocols import DayBar
+from defs.protocols import BarConflict, DayBar
 from shared.errors import AppError
 from shared.sessions import infer_session
 
@@ -43,3 +43,10 @@ class MockQuantDataIntraDay:
             bars.append(bar)
 
         return bars
+
+    def fetch_conflicts(self, ticker: str, start_date: date, end_date: date) -> list[BarConflict]:
+        # No fixture data for pending-resolution conflicts yet -- CLI-level tests only need this
+        # method to exist (day-chart always calls it for --provider quant-data); real grouping/
+        # validation logic is covered directly against QuantDataIntraDay in
+        # tests/unit/test_quant_data_provider.py.
+        return []

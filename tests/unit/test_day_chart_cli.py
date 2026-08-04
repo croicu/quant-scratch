@@ -1,15 +1,38 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from day_chart import cli
+from defs.protocols import DayBar
 from shared.settings import IBKRSettings, Settings
 from tests.mocks.quant_data import MockQuantDataIntraDay
 
 SETTINGS_PATH = Path(__file__).parent.parent / "data" / "settings.json"
+
+
+class _FakeProviderTrackingConflictFetches:
+    def __init__(self):
+        self.fetch_conflicts_calls: list[tuple[str, date, date]] = []
+
+    def fetch_bars(self, ticker: str, target_date: date) -> list[DayBar]:
+        return [
+            DayBar(
+                timestamp=datetime(target_date.year, target_date.month, target_date.day, 14, 30, tzinfo=timezone.utc),
+                open=1.0,
+                high=1.0,
+                low=1.0,
+                close=1.0,
+                volume=1,
+                session="regular",
+            )
+        ]
+
+    def fetch_conflicts(self, ticker: str, start_date: date, end_date: date) -> list:
+        self.fetch_conflicts_calls.append((ticker, start_date, end_date))
+        return []
 
 
 def test_resolve_session_date_defaults_to_weekday_as_is():
@@ -100,7 +123,7 @@ def test_main_shows_chart_and_writes_csv_and_returns_zero(tmp_path, capsys):
         provider=MockQuantDataIntraDay(),
         settings_path=SETTINGS_PATH,
         output_dir=tmp_path,
-        show_chart=lambda ticker, days: shown_calls.append((ticker, days)),
+        show_chart=lambda ticker, days, conflicts=None: shown_calls.append((ticker, days)),
     )
 
     captured = capsys.readouterr()
@@ -157,7 +180,7 @@ def test_main_range_mode_skips_weekend_and_writes_combined_csv(tmp_path):
         provider=MockQuantDataIntraDay(),
         settings_path=SETTINGS_PATH,
         output_dir=tmp_path,
-        show_chart=lambda ticker, days: shown_calls.append((ticker, days)),
+        show_chart=lambda ticker, days, conflicts=None: shown_calls.append((ticker, days)),
     )
 
     csv_path = tmp_path / "SPY_2026-01-02_2026-01-05_data.csv"
@@ -179,7 +202,7 @@ def test_main_range_mode_ignores_date_argument(tmp_path):
         provider=MockQuantDataIntraDay(),
         settings_path=SETTINGS_PATH,
         output_dir=tmp_path,
-        show_chart=lambda ticker, days: shown_calls.append((ticker, days)),
+        show_chart=lambda ticker, days, conflicts=None: shown_calls.append((ticker, days)),
     )
 
     assert exit_code == 0
@@ -268,7 +291,83 @@ def test_main_range_mode_ibkr_cap_does_not_apply_to_quant_data_provider(tmp_path
         provider=MockQuantDataIntraDay(),
         settings_path=SETTINGS_PATH,
         output_dir=tmp_path,
-        show_chart=lambda ticker, days: None,
+        show_chart=lambda ticker, days, conflicts=None: None,
     )
 
     assert exit_code == 0
+
+
+def test_main_fetches_conflicts_for_quant_data_provider_single_day(tmp_path):
+    fake_provider = _FakeProviderTrackingConflictFetches()
+
+    exit_code = cli.main(
+        ["SPY", "--date", "2026-01-02", "--provider", "quant-data"],
+        provider=fake_provider,
+        settings_path=SETTINGS_PATH,
+        output_dir=tmp_path,
+        show_chart=lambda ticker, days, conflicts=None: None,
+    )
+
+    assert exit_code == 0
+    assert fake_provider.fetch_conflicts_calls == [("SPY", date(2026, 1, 2), date(2026, 1, 2))]
+
+
+def test_main_fetches_conflicts_once_for_whole_range_not_per_day(tmp_path):
+    fake_provider = _FakeProviderTrackingConflictFetches()
+
+    exit_code = cli.main(
+        ["SPY", "--start-date", "2026-01-02", "--end-date", "2026-01-05", "--provider", "quant-data"],
+        provider=fake_provider,
+        settings_path=SETTINGS_PATH,
+        output_dir=tmp_path,
+        show_chart=lambda ticker, days, conflicts=None: None,
+    )
+
+    assert exit_code == 0
+    assert fake_provider.fetch_conflicts_calls == [("SPY", date(2026, 1, 2), date(2026, 1, 5))]
+
+
+def test_main_does_not_fetch_conflicts_for_ibkr_or_yahoo_providers(tmp_path):
+    for provider_name in (cli.PROVIDER_IBKR, cli.PROVIDER_YAHOO):
+        fake_provider = _FakeProviderTrackingConflictFetches()
+
+        exit_code = cli.main(
+            ["SPY", "--date", "2026-01-02", "--provider", provider_name],
+            provider=fake_provider,
+            settings_path=SETTINGS_PATH,
+            output_dir=tmp_path,
+            show_chart=lambda ticker, days, conflicts=None: None,
+        )
+
+        assert exit_code == 0
+        assert fake_provider.fetch_conflicts_calls == []
+
+
+def test_main_passes_conflicts_through_to_show_chart(tmp_path):
+    fake_provider = _FakeProviderTrackingConflictFetches()
+    shown_calls = []
+
+    cli.main(
+        ["SPY", "--date", "2026-01-02", "--provider", "quant-data"],
+        provider=fake_provider,
+        settings_path=SETTINGS_PATH,
+        output_dir=tmp_path,
+        show_chart=lambda ticker, days, conflicts=None: shown_calls.append(conflicts),
+    )
+
+    assert shown_calls == [[]]  # fake provider reports no conflicts, but the parameter is still threaded through
+
+
+def test_main_passes_empty_conflicts_for_ibkr_provider(tmp_path):
+    fake_provider = _FakeProviderTrackingConflictFetches()
+    shown_calls = []
+
+    cli.main(
+        ["SPY", "--date", "2026-01-02", "--provider", "ibkr"],
+        provider=fake_provider,
+        settings_path=SETTINGS_PATH,
+        output_dir=tmp_path,
+        show_chart=lambda ticker, days, conflicts=None: shown_calls.append(conflicts),
+    )
+
+    assert shown_calls == [[]]

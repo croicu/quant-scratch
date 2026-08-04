@@ -4,9 +4,11 @@ from datetime import date, datetime, timezone
 
 import pytest
 from matplotlib.backend_bases import CloseEvent, FigureCanvasBase
+from matplotlib.colors import to_rgba
+from matplotlib.patches import Rectangle
 
 from day_chart import chart
-from defs.protocols import DayBar
+from defs.protocols import BarConflict, DayBar, ProviderBar
 from shared.errors import AppError
 from shared.settings import Settings, WindowSettings
 
@@ -21,6 +23,32 @@ def _bar(hour_utc: int, minute_utc: int, session: str) -> DayBar:
         volume=1000,
         session=session,
     )
+
+
+def _conflict(hour_utc: int, minute_utc: int, candidate_count: int = 1) -> BarConflict:
+    whistleblower_bar = DayBar(
+        timestamp=datetime(2026, 1, 2, hour_utc, minute_utc, tzinfo=timezone.utc),
+        open=470.0,
+        high=470.6,
+        low=469.5,
+        close=470.3,
+        volume=500,
+        session="regular",
+    )
+    candidates = []
+    for candidate_index in range(candidate_count):
+        candidate_bar = DayBar(
+            timestamp=datetime(2026, 1, 2, hour_utc, minute_utc, tzinfo=timezone.utc),
+            open=471.0,
+            high=471.6,
+            low=470.5,
+            close=471.3,
+            volume=600,
+            session="regular",
+        )
+        candidates.append(ProviderBar(provider=f"candidate{candidate_index}", bar=candidate_bar))
+
+    return BarConflict(field_group="ohlc", whistleblower=ProviderBar(provider="yfinance", bar=whistleblower_bar), candidates=candidates)
 
 
 def test_render_chart_returns_figure_with_price_and_volume_axes_for_one_day():
@@ -53,6 +81,114 @@ def test_render_chart_returns_one_column_pair_per_day():
 def test_render_chart_raises_on_no_days():
     with pytest.raises(AppError):
         chart.render_chart("SPY", [])
+
+
+def _candle_bodies(price_axis) -> list[Rectangle]:
+    bodies = []
+    for patch in price_axis.patches:
+        if isinstance(patch, Rectangle) and patch.get_gid() == chart._CONFLICT_CANDLE_GID:
+            bodies.append(patch)
+    return bodies
+
+
+def test_render_chart_draws_no_candlesticks_without_conflicts():
+    bars = [_bar(14, 30, "regular")]
+
+    figure = chart.render_chart("SPY", [(date(2026, 1, 2), bars)])
+
+    price_axis = figure.axes[0]
+    assert _candle_bodies(price_axis) == []
+    chart.plt.close(figure)
+
+
+def test_render_chart_draws_no_candlesticks_when_conflicts_is_empty_list():
+    bars = [_bar(14, 30, "regular")]
+
+    figure = chart.render_chart("SPY", [(date(2026, 1, 2), bars)], [])
+
+    price_axis = figure.axes[0]
+    assert _candle_bodies(price_axis) == []
+    chart.plt.close(figure)
+
+
+def test_render_chart_draws_whistleblower_red_and_one_candidate_blue():
+    bars = [_bar(14, 30, "regular")]
+    conflicts = [_conflict(14, 30, candidate_count=1)]
+
+    figure = chart.render_chart("SPY", [(date(2026, 1, 2), bars)], conflicts)
+
+    price_axis = figure.axes[0]
+    bodies = _candle_bodies(price_axis)
+    assert len(bodies) == 2  # one whistleblower + one candidate
+
+    colors = []
+    for body in bodies:
+        colors.append(body.get_facecolor())
+    assert to_rgba(chart._WHISTLEBLOWER_COLOR) in colors
+    assert to_rgba(chart._CANDIDATE_COLOR) in colors
+    chart.plt.close(figure)
+
+
+def test_render_chart_draws_one_candlestick_per_candidate():
+    bars = [_bar(14, 30, "regular")]
+    conflicts = [_conflict(14, 30, candidate_count=3)]
+
+    figure = chart.render_chart("SPY", [(date(2026, 1, 2), bars)], conflicts)
+
+    price_axis = figure.axes[0]
+    bodies = _candle_bodies(price_axis)
+    assert len(bodies) == 4  # one whistleblower + three candidates
+    chart.plt.close(figure)
+
+
+def test_render_chart_only_draws_conflicts_on_their_own_day():
+    bars_day_1 = [_bar(14, 30, "regular")]
+    bars_day_2 = [
+        DayBar(
+            timestamp=datetime(2026, 1, 5, 14, 30, tzinfo=timezone.utc),
+            open=470.0,
+            high=470.5,
+            low=469.8,
+            close=470.2,
+            volume=1000,
+            session="regular",
+        )
+    ]
+    days = [(date(2026, 1, 2), bars_day_1), (date(2026, 1, 5), bars_day_2)]
+    conflicts = [_conflict(14, 30, candidate_count=1)]  # timestamped 2026-01-02
+
+    figure = chart.render_chart("SPY", days, conflicts)
+
+    day_1_price_axis = figure.axes[0]
+    day_2_price_axis = figure.axes[2]  # axes ordering: [day1 price, day1 volume, day2 price, day2 volume]
+    assert len(_candle_bodies(day_1_price_axis)) == 2
+    assert len(_candle_bodies(day_2_price_axis)) == 0
+    chart.plt.close(figure)
+
+
+def test_show_chart_forwards_conflicts_to_render_chart(monkeypatch):
+    bars = [_bar(14, 30, "regular")]
+    conflicts = [_conflict(14, 30)]
+    received = []
+
+    def fake_render_chart(ticker, days, passed_conflicts=None):
+        received.append(passed_conflicts)
+        real_figure = chart.plt.figure()
+        return real_figure
+
+    monkeypatch.setattr(chart, "render_chart", fake_render_chart)
+    monkeypatch.setattr(chart.plt, "switch_backend", lambda name: None)
+    monkeypatch.setattr(chart.plt, "show", lambda block=True: None)
+
+    def fake_start_event_loop(self, timeout=0):
+        close_event = CloseEvent("close_event", self)
+        self.callbacks.process("close_event", close_event)
+
+    monkeypatch.setattr(FigureCanvasBase, "start_event_loop", fake_start_event_loop)
+
+    chart.show_chart("SPY", [(date(2026, 1, 2), bars)], conflicts)
+
+    assert received == [conflicts]
 
 
 class _FakeWindow:
@@ -114,8 +250,8 @@ def _patch_show_chart_for_window_tests(
 
     real_render_chart = chart.render_chart
 
-    def render_chart_with_fake_window(ticker, days):
-        figure = real_render_chart(ticker, days)
+    def render_chart_with_fake_window(ticker, days, conflicts=None):
+        figure = real_render_chart(ticker, days, conflicts)
         figure.canvas.manager.window = fake_window
         return figure
 

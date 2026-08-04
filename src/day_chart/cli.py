@@ -9,6 +9,7 @@ from pathlib import Path
 from time import perf_counter
 
 from defs.contracts import IntraDayProvider
+from defs.protocols import BarConflict
 from shared.diagnostics import ConsoleLogSink, Logger
 from shared.errors import AppError
 from shared.providers import yahoo_finance
@@ -39,7 +40,7 @@ PROVIDER_YAHOO = yahoo_finance.PROVIDER_NAME
 # reads), so this only applies to the ibkr provider.
 MAX_IBKR_RANGE_DAYS = 30
 
-ShowChartFn = Callable[[str, list[DayChartData]], None]
+ShowChartFn = Callable[[str, list[DayChartData], list[BarConflict]], None]
 
 
 @dataclass
@@ -269,11 +270,23 @@ def main(
 
         Logger.perf(f"fetch phase ({len(days)} day(s))", perf_counter() - fetch_phase_start)
 
+        # Pending-resolution ("disputed") bars are a quant-data-only reconciliation concept --
+        # ibkr/yahoo are raw single-source fetches with nothing to be disputed against, so this is
+        # a silent no-op for them rather than an error. Always on for quant-data, no separate flag:
+        # one call for the whole resolved range (not per-day) since fetch_conflicts already
+        # accepts a range natively.
+        conflicts: list[BarConflict] = []
+        if arguments.provider == PROVIDER_QUANT_DATA:
+            if is_range_mode:
+                conflicts = active_provider.fetch_conflicts(normalized_ticker, session_dates[0], session_dates[-1])
+            else:
+                conflicts = active_provider.fetch_conflicts(normalized_ticker, session_date, session_date)
+
         all_bars = []
         for _, day_bars in days:
             all_bars.extend(day_bars)
 
-        active_show_chart(normalized_ticker, days)
+        active_show_chart(normalized_ticker, days, conflicts)
 
         write_start = perf_counter()
         csv_path.write_text(bars_to_csv(all_bars), encoding="utf-8", newline="")
