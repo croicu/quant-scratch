@@ -32,6 +32,8 @@ _DAY_PADDING_PX = 5
 _EVENT_LOOP_POLL_SECONDS = 0.1
 _RESIZE_DEBOUNCE_MS = 200
 
+_MAIN_CANDLE_COLOR = "black"
+_MAIN_CANDLE_GID = "main-candle-body"
 _WHISTLEBLOWER_COLOR = "#dc2626"
 _CANDIDATE_COLOR = "#2563eb"
 _CANDLE_WIDTH_DAYS = 0.6 / (24 * 60)  # narrower than a full minute, leaves a visible gap
@@ -234,16 +236,15 @@ def render_chart(ticker: str, days: list[DayChartData], conflicts: list[BarConfl
         volume_axis = axes[1, column_index]
 
         timestamps_et: list[datetime] = []
-        closes: list[float] = []
         volumes: list[int] = []
         sessions: list[str] = []
         for bar in bars:
-            timestamps_et.append(bar.timestamp.astimezone(EASTERN))
-            closes.append(bar.close)
+            timestamp_et = bar.timestamp.astimezone(EASTERN)
+            timestamps_et.append(timestamp_et)
             volumes.append(bar.volume)
             sessions.append(bar.session)
+            _draw_candlestick(price_axis, timestamp_et, bar, _MAIN_CANDLE_COLOR, _MAIN_CANDLE_GID)
 
-        price_axis.plot(timestamps_et, closes, color="#1f2937", linewidth=1)
         price_axis.set_title(session_date.isoformat())
 
         volume_axis.bar(timestamps_et, volumes, color="#1f2937", width=1 / (24 * 60))
@@ -276,13 +277,13 @@ def _draw_conflict(axis, conflict: BarConflict, timestamp_et: datetime) -> None:
     # price line); candidate candles fan out to its right, offset per candidate so multiple
     # candidates (possible, even if today's data is always exactly one) stay visually distinct
     # rather than fully overlapping.
-    _draw_candlestick(axis, timestamp_et, conflict.whistleblower.bar, _WHISTLEBLOWER_COLOR)
+    _draw_candlestick(axis, timestamp_et, conflict.whistleblower.bar, _WHISTLEBLOWER_COLOR, _CONFLICT_CANDLE_GID)
     for candidate_index, candidate in enumerate(conflict.candidates):
         offset = timedelta(days=_CANDLE_OFFSET_DAYS * (candidate_index + 1))
-        _draw_candlestick(axis, timestamp_et + offset, candidate.bar, _CANDIDATE_COLOR)
+        _draw_candlestick(axis, timestamp_et + offset, candidate.bar, _CANDIDATE_COLOR, _CONFLICT_CANDLE_GID)
 
 
-def _draw_candlestick(axis, timestamp_et: datetime, bar: DayBar, color: str) -> None:
+def _draw_candlestick(axis, timestamp_et: datetime, bar: DayBar, color: str, gid: str) -> None:
     axis.plot([timestamp_et, timestamp_et], [bar.low, bar.high], color=color, linewidth=1, zorder=3)
 
     body_bottom = min(bar.open, bar.close)
@@ -299,8 +300,9 @@ def _draw_candlestick(axis, timestamp_et: datetime, bar: DayBar, color: str) -> 
         color=color,
         zorder=3,
         # axvspan (session shading) is itself implemented with Rectangle patches, so a plain
-        # isinstance(patch, Rectangle) check can't tell them apart -- gid tags this one as ours.
-        gid=_CONFLICT_CANDLE_GID,
+        # isinstance(patch, Rectangle) check can't tell them apart -- gid tags this one as ours,
+        # and distinguishes a main-chart candle from a conflict candle for the same reason.
+        gid=gid,
     )
     axis.add_patch(body)
 
