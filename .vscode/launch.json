@@ -38,6 +38,24 @@
       "justMyCode": false
     },
     {
+      "name": "Python: Run day-chart (CLI, databento, start date, end date)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "day_chart.cli",
+      "args": ["${input:ticker}", "--provider", "databento", "--start-date", "${input:startDate}", "--end-date", "${input:endDate}"],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      "name": "Python: Run day-chart (CLI, yahoo, start date, end date)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "day_chart.cli",
+      "args": ["${input:ticker}", "--provider", "yahoo", "--start-date", "${input:startDate}", "--end-date", "${input:endDate}"],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
       "name": "Python: Run Unit Tests",
       "type": "debugpy",
       "request": "launch",

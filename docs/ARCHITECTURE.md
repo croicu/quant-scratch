@@ -112,6 +112,11 @@ and has no CLI/console script of its own.
   validation: every field already has a default matching `IBKRIntraDay`'s own constructor defaults
   for this repo's one local paper-Gateway setup, so the section (or any key within it) may be
   omitted, each falling back independently rather than requiring all-or-nothing.
+  Also `DatabentoSettings` (`api_key` required, `dataset` defaulting to `"DBEQ.BASIC"`) and a
+  `Settings.databento` field, parsed from an optional `databento` object (JSON key `apiKey`) — like
+  `postgres` and unlike `ibkr`, `api_key` has no usable default (a paid-account credential, not a
+  local service), so an empty `databento` object still raises `TaskError`. Meant to live in
+  `settings.local.json` only (gitignored), never the committed `settings.json`, since it's a secret.
 - `errors.py` — `AppError`, `TaskError`, `telemetry_session()`
 - `sessions.py` — `infer_session(timestamp_utc) -> str`, classifying a UTC timestamp into
   `"pre-market"` (4:00–9:30 ET), `"regular"` (9:30–16:00 ET), or `"after-market"` (16:00–20:00 ET);
@@ -254,6 +259,44 @@ and has no CLI/console script of its own.
     opposite tradeoff from `day-chart`'s extended-hours-volume case, so no default change was
     warranted. Defines `PROVIDER_NAME = "ibkr"`, stamped onto every `StockQuote.provider` it
     returns -- same re-export pattern as `yahoo_finance.py`'s (`stock_quote.cli.PROVIDER_IBKR`).
+  - `databento.py` -- `DatabentoIntraDay`, another `defs.contracts.IntraDayProvider` implementation,
+    wrapping [`databento`](https://github.com/databento/databento-python)'s `Historical` client
+    against Databento's consolidated US equities feed. A fourth `day-chart` `--provider` choice,
+    alongside (not replacing) `ibkr` — added after IBKR already closed the extended-hours-volume
+    gap that originally motivated evaluating Databento
+    ([tasks/databento_intraday_volume.md](../tasks/databento_intraday_volume.md) /
+    [issue #5](https://github.com/croicu/quant-scratch/issues/5), postponed 2026-07-25 over
+    usage-based billing risk, revisited later as an additional source rather than a gap-filler).
+    Requests `schema=Schema.OHLCV_1M` (1-minute bars) for the 4:00-20:00 ET session window (same
+    boundary `IBKRIntraDay` uses), `dataset` defaulting to `"DBEQ.BASIC"` (Databento's
+    multi-venue-consolidated feed, picked so a single exchange's tape doesn't silently
+    under-report volume for a security trading across venues) but overridable per
+    `Settings.databento.dataset`. `client_factory: Callable[[str], db.Historical]`, defaulting to
+    `db.Historical` itself, overridable for tests — same connect-per-call-via-factory shape as
+    `IBKRIntraDay`, though `Historical` itself is a thin HTTP client wrapper with no persistent
+    connection to open/close. Converts the response via `DBNStore.to_df(price_type="float",
+    tz="UTC")` and iterates rows (`for row_timestamp, row in frame.iterrows()`), same
+    DataFrame-iteration shape as `yahoo_finance.py`'s `YahooFinanceIntraDay`. Reuses
+    `shared.sessions.infer_session` for `DayBar.session`; no `incomplete` flag support (Databento's
+    OHLCV records carry none). Requires a paid API key (`Settings.databento.api_key`, no usable
+    default) — live-verified against a real account: `DBEQ.BASIC` does return non-zero
+    extended-hours volume for SPY (0/21 zero-volume pre-market bars, 0/74 after-market, vs.
+    Yahoo's 315/315), but coverage is noticeably sparser than `IBKRIntraDay`'s -- `OHLCV_1M`
+    simply omits any minute with no trade rather than emitting a zero-volume bar, and `DBEQ.BASIC`
+    itself only aggregates a subset of venues, not a full consolidated SIP tape (no `EQUS.SIP`/
+    `EQUS.ALL`-equivalent is actually published/live on the account tested against, despite
+    existing as enum values in the `databento` SDK — `DBEQ.BASIC` is the best available
+    consolidated option).
+
+    Also live-verified: Databento's `hist.databento.com` gateway returns intermittent 504s on an
+    otherwise-unremarkable request (same ticker/date/dataset succeeding on one call, failing on
+    the next, no reproducible pattern) — `fetch_bars` retries up to `max_attempts` (default 3,
+    constructor-overridable) with a fixed `retry_delay_seconds` (default 2.0) between attempts,
+    but only for `db.BentoServerError` (500-series -- Databento's own infrastructure); a
+    `db.BentoClientError` (400-series -- bad API key, invalid symbol, anything that will never
+    succeed on retry) falls through to the same generic `AppError`-wrapping path as any other
+    exception, immediately. `sleep_fn: Callable[[float], None]`, defaulting to `time.sleep`, is
+    injectable the same way `client_factory` is, so the retry unit tests never actually sleep.
 
 ### `ibkr_fetch` -- manual pipeline-validation script (not a registered CLI)
 
@@ -400,27 +443,32 @@ confined to `shared/providers/quant_data.py`.
   `settings_path: Path`, `output_dir: Path`, and `show_chart: ShowChartFn` (`Callable[[str,
   list[DayChartData], list[BarConflict]], None]`) parameters — same parameter-based DI pattern as `stock_quote.cli`
   (tests inject a non-GUI stand-in for `show_chart`, same reason `provider` is injected instead of
-  hitting a real database/Gateway). `--provider {ibkr,quant-data,yahoo}` (default `ibkr`) selects
-  which data source backs the default construction path — a real behavior change from when
+  hitting a real database/Gateway). `--provider {ibkr,quant-data,yahoo,databento}` (default `ibkr`)
+  selects which data source backs the default construction path — a real behavior change from when
   quant-data was the only option, deliberate: IBKR has strictly more data (real extended-hours
   volume) than the Yahoo-sourced quant-data path (see `shared/providers/ibkr.py`'s note above and
   [issue #12](https://github.com/croicu/quant-scratch/issues/12)). `yahoo`
   (`YahooFinanceIntraDay`, restored per [issue #14](https://github.com/croicu/quant-scratch/issues/14))
   is the third option, added purely for comparing a raw-source fetch against what's actually in the
   quant-data warehouse — not a data-quality improvement (see `shared/providers/yahoo_finance.py`'s
-  note above). The default provider can't be constructed before settings are loaded (`ibkr` needs
-  `Settings.ibkr`, `quant-data` needs `Settings.postgres`, `yahoo` needs nothing), so construction
-  happens *after* `Settings.load()` succeeds, via `_build_provider(provider_name, settings) ->
-  IntraDayProvider` — a small pure function factored out specifically so a unit test can assert the
-  right provider *class* gets constructed (with what settings-derived arguments) without ever
-  touching a real connection: `IBKRIntraDay.__init__` doesn't connect either way (connect-per-
-  `fetch_bars`-call, see its own note above), and `YahooFinanceIntraDay.__init__` takes no
-  arguments at all, so constructing either in a test is already offline-safe;
-  `QuantDataIntraDay.__init__` does connect eagerly, so no test exercises its construction path for
-  real, same as before this change. `_build_provider` raises `AppError` if the provider-specific
-  required settings are missing (`quant-data` requires `Settings.postgres`; `ibkr`/`yahoo` have no
-  required settings — `ibkr`'s absent `Settings.ibkr` just means every field falls back to its own
-  default, and `yahoo` reads no settings at all). `output_dir` has no CLI flag
+  note above). `databento` (`DatabentoIntraDay`, see `shared/providers/databento.py`'s note above) is
+  the fourth, an additional paid source rather than a default change — IBKR already covers the
+  extended-hours-volume need. The default provider can't be constructed before settings are loaded
+  (`ibkr` needs `Settings.ibkr`, `quant-data` needs `Settings.postgres`, `databento` needs
+  `Settings.databento`, `yahoo` needs nothing), so construction happens *after* `Settings.load()`
+  succeeds, via `_build_provider(provider_name, settings) -> IntraDayProvider` — a small pure
+  function factored out specifically so a unit test can assert the right provider *class* gets
+  constructed (with what settings-derived arguments) without ever touching a real connection:
+  `IBKRIntraDay.__init__` doesn't connect either way (connect-per-`fetch_bars`-call, see its own
+  note above), `YahooFinanceIntraDay.__init__` takes no arguments at all, and `DatabentoIntraDay.
+  __init__` only stores its api key/dataset (the actual HTTP client is constructed lazily inside
+  `fetch_bars` via `client_factory`), so constructing any of the three in a test is already
+  offline-safe; `QuantDataIntraDay.__init__` does connect eagerly, so no test exercises its
+  construction path for real, same as before this change. `_build_provider` raises `AppError` if
+  the provider-specific required settings are missing (`quant-data` requires `Settings.postgres`;
+  `databento` requires `Settings.databento`; `ibkr`/`yahoo` have no required settings — `ibkr`'s
+  absent `Settings.ibkr` just means every field falls back to its own default, and `yahoo` reads no
+  settings at all). `output_dir` has no CLI flag
   (`--output-dir` was deliberately deferred); it exists purely as a test seam, the same role
   `settings_path` plays — it now only affects where the CSV lands, since the chart itself is shown
   in a popup rather than saved. Owns `resolve_session_date(date_argument, today)` — resolves the
@@ -451,8 +499,8 @@ confined to `shared/providers/quant_data.py`.
   `active_provider.fetch_conflicts(ticker, ...)` — once for the whole resolved date range (single
   day or range mode both pass through the same call, since `fetch_conflicts` already accepts a
   range), *always*, no separate opt-in flag — and threads the result through to `show_chart` as its
-  third argument. A silent no-op (`conflicts = []`) for `ibkr`/`yahoo`: nothing to dispute for a
-  raw single-source fetch. `fetch_conflicts` isn't part of `IntraDayProvider`, so this call is
+  third argument. A silent no-op (`conflicts = []`) for `ibkr`/`yahoo`/`databento`: nothing to
+  dispute for a raw single-source fetch. `fetch_conflicts` isn't part of `IntraDayProvider`, so this call is
   gated on `arguments.provider == PROVIDER_QUANT_DATA` (the flag), not on the injected/constructed
   provider's type — consistent with how the `ibkr` range cap above is also gated on the flag rather
   than an `isinstance` check ([issue #15](https://github.com/croicu/quant-scratch/issues/15)).
@@ -504,21 +552,23 @@ against a local IB Gateway/TWS instance, live-first with an automatic delayed-da
 `tests.mocks.yahoo_finance.MockYahooFinance`, a fixture lookup) → `StockQuote` →
 `output.quote_to_csv` → stdout.
 
-`day-chart TICKER [--date ... | --start-date ... --end-date ...] [--provider {ibkr,quant-data,yahoo}]`
+`day-chart TICKER [--date ... | --start-date ... --end-date ...] [--provider {ibkr,quant-data,yahoo,databento}]`
 → `cli._build_provider` (skipped if a `provider` was injected) selects `shared.providers.ibkr.IBKRIntraDay`
-(default), `shared.providers.quant_data.QuantDataIntraDay`, or
-`shared.providers.yahoo_finance.YahooFinanceIntraDay` from `Settings.ibkr`/`Settings.postgres`/
-nothing respectively → `cli.resolve_session_date` (single day) or `cli.resolve_date_range` (either
-range flag given, plus a 30-day cap check when the provider is `ibkr`) → one `list[date]` →
-per-date injected `IntraDayProvider.fetch_bars` (real, `ibkr`: `IBKRIntraDay`, a connect-per-call
-`ib_async` request against a local IB Gateway/TWS instance; real, `quant-data`: `QuantDataIntraDay`,
-wrapping a `quant_data.MarketData` read against the Postgres warehouse; real, `yahoo`:
-`YahooFinanceIntraDay`, a direct `yfinance` network call; all three tag each bar via
+(default), `shared.providers.quant_data.QuantDataIntraDay`,
+`shared.providers.yahoo_finance.YahooFinanceIntraDay`, or `shared.providers.databento.DatabentoIntraDay`
+from `Settings.ibkr`/`Settings.postgres`/nothing/`Settings.databento` respectively → `cli.resolve_session_date`
+(single day) or `cli.resolve_date_range` (either range flag given, plus a 30-day cap check when the
+provider is `ibkr`) → one `list[date]` → per-date injected `IntraDayProvider.fetch_bars` (real,
+`ibkr`: `IBKRIntraDay`, a connect-per-call `ib_async` request against a local IB Gateway/TWS
+instance; real, `quant-data`: `QuantDataIntraDay`, wrapping a `quant_data.MarketData` read against
+the Postgres warehouse; real, `yahoo`: `YahooFinanceIntraDay`, a direct `yfinance` network call;
+real, `databento`: `DatabentoIntraDay`, a `databento.Historical.timeseries.get_range` HTTP request
+against Databento's consolidated equities feed; all four tag each bar via
 `shared.sessions.infer_session`; test: `tests.mocks.quant_data.MockQuantDataIntraDay`, a fixture
 lookup) — in range mode, a per-day `AppError` is logged as a warning and that day dropped rather
 than failing the whole command — → `list[DayChartData]` (`(date, list[DayBar])` per charted day).
 When `--provider quant-data`, also → `QuantDataIntraDay.fetch_conflicts` (once for the whole
-resolved range; silent no-op → `[]` for `ibkr`/`yahoo`) → `list[BarConflict]`. Both → injected
+resolved range; silent no-op → `[]` for `ibkr`/`yahoo`/`databento`) → `list[BarConflict]`. Both → injected
 `show_chart` (real: `chart.show_chart`, a blocking popup window rendering red/blue candlesticks for
 any conflicts; test: a non-GUI stand-in) and, after flattening every charted day's bars into one
 list, `output.bars_to_csv` (→ `<TICKER>_<DATE>_data.csv` for a single day,
@@ -547,8 +597,9 @@ conforms to, independent of which one is wired in.
   `shared.providers.ibkr.IBKRIntraDay` (production, `day-chart`'s default provider),
   `shared.providers.quant_data.QuantDataIntraDay` (production, selectable via `--provider
   quant-data`), `shared.providers.yahoo_finance.YahooFinanceIntraDay` (production, selectable via
-  `--provider yahoo`, for source-vs-warehouse comparison), and
-  `tests.mocks.quant_data.MockQuantDataIntraDay` (tests).
+  `--provider yahoo`, for source-vs-warehouse comparison),
+  `shared.providers.databento.DatabentoIntraDay` (production, selectable via `--provider
+  databento`, requires a paid API key), and `tests.mocks.quant_data.MockQuantDataIntraDay` (tests).
 - `defs.protocols.ProviderBar`/`BarConflict` — pure data, no behavior; grouped/produced by
   `QuantDataIntraDay.fetch_conflicts` and rendered (candlesticks) by `day_chart/chart.py`. Not part
   of `IntraDayProvider` — no behavioral interface governs these, since only `QuantDataIntraDay`

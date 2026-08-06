@@ -41,6 +41,15 @@ class IBKRSettings:
 
 
 @dataclass
+class DatabentoSettings:
+    # Unlike IBKRSettings, api_key has no usable default -- Databento is a paid-account API key,
+    # not a local service with a sensible localhost fallback, so this section is required (and
+    # api_key mandatory within it) once 'databento' is present at all.
+    api_key: str
+    dataset: str = "DBEQ.BASIC"
+
+
+@dataclass
 class Settings:
     debug: bool
     logging: TelemetryLevel = TelemetryLevel.ERROR
@@ -48,6 +57,7 @@ class Settings:
     excluded_categories: list[str] = field(default_factory=list)
     postgres: PostgresSettings | None = None
     ibkr: IBKRSettings | None = None
+    databento: DatabentoSettings | None = None
     window: WindowSettings | None = None
 
     _instance: ClassVar[Settings | None] = None
@@ -160,6 +170,19 @@ class Settings:
                 client_id=int(ibkr_payload.get("clientId", default_ibkr.client_id)),
             )
 
+        databento_settings: DatabentoSettings | None = None
+        databento_payload = settings_payload.get("databento")
+        if databento_payload is not None:
+            if not isinstance(databento_payload, dict):
+                raise TaskError("'settings.databento' must be a JSON object.")
+            if "apiKey" not in databento_payload:
+                raise TaskError("'settings.databento' is missing required key(s): apiKey")
+            default_databento = DatabentoSettings(api_key="")
+            databento_settings = DatabentoSettings(
+                api_key=str(databento_payload["apiKey"]),
+                dataset=str(databento_payload.get("dataset", default_databento.dataset)),
+            )
+
         window_settings: WindowSettings | None = None
         window_payload = settings_payload.get("window")
         if window_payload is not None:
@@ -180,6 +203,7 @@ class Settings:
             excluded_categories=excluded_categories,
             postgres=postgres_settings,
             ibkr=ibkr_settings,
+            databento=databento_settings,
             window=window_settings,
         )
 

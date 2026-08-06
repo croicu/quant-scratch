@@ -7,7 +7,7 @@ import pytest
 
 from day_chart import cli
 from defs.protocols import DayBar
-from shared.settings import IBKRSettings, Settings
+from shared.settings import DatabentoSettings, IBKRSettings, Settings
 from tests.mocks.quant_data import MockQuantDataIntraDay
 
 SETTINGS_PATH = Path(__file__).parent.parent / "data" / "settings.json"
@@ -267,6 +267,29 @@ def test_build_provider_yahoo_needs_no_settings():
     provider = cli._build_provider(cli.PROVIDER_YAHOO, settings)
 
     assert type(provider).__name__ == "YahooFinanceIntraDay"
+
+
+def test_build_provider_databento_raises_when_databento_settings_missing():
+    settings = Settings(debug=False)  # databento defaults to None
+
+    with pytest.raises(cli.AppError):
+        cli._build_provider(cli.PROVIDER_DATABENTO, settings)
+
+
+def test_build_provider_databento_forwards_settings_fields(monkeypatch):
+    captured_kwargs = {}
+
+    class FakeDatabentoIntraDay:
+        def __init__(self, **kwargs):
+            captured_kwargs.update(kwargs)
+
+    monkeypatch.setattr(cli, "DatabentoIntraDay", FakeDatabentoIntraDay)
+    settings = Settings(debug=False, databento=DatabentoSettings(api_key="db-test-key", dataset="XNAS.ITCH"))
+
+    provider = cli._build_provider(cli.PROVIDER_DATABENTO, settings)
+
+    assert isinstance(provider, FakeDatabentoIntraDay)
+    assert captured_kwargs == {"api_key": "db-test-key", "dataset": "XNAS.ITCH"}
 
 
 def test_main_range_mode_rejects_oversized_range_for_ibkr_provider(tmp_path, capsys):

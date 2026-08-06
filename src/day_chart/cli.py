@@ -12,7 +12,8 @@ from defs.contracts import IntraDayProvider
 from defs.protocols import BarConflict
 from shared.diagnostics import ConsoleLogSink, Logger
 from shared.errors import AppError
-from shared.providers import yahoo_finance
+from shared.providers import databento, yahoo_finance
+from shared.providers.databento import DatabentoIntraDay
 from shared.providers.ibkr import IBKRIntraDay
 from shared.providers.quant_data import QuantDataIntraDay
 from shared.providers.yahoo_finance import YahooFinanceIntraDay
@@ -31,6 +32,8 @@ PROVIDER_QUANT_DATA = "quant-data"
 # doesn't stamp a provider identity onto DayBar the way stock-quote does onto StockQuote, but
 # keeping this one aliased too avoids a stray third spelling of "yahoo" existing in the codebase.
 PROVIDER_YAHOO = yahoo_finance.PROVIDER_NAME
+# Same aliasing reasoning, against shared.providers.databento.PROVIDER_NAME.
+PROVIDER_DATABENTO = databento.PROVIDER_NAME
 
 # IBKR's historical-data API enforces its own pacing limits (documented ceiling: 60 requests per
 # 10 minutes). Range mode calls fetch_bars once per day, so an unbounded range could plausibly
@@ -56,7 +59,7 @@ class CliArguments:
 def parse_args(argv: list[str]) -> CliArguments:
     parser = argparse.ArgumentParser(
         prog="day-chart",
-        usage="day-chart TICKER [--date YYYY-MM-DD | --start-date YYYY-MM-DD --end-date YYYY-MM-DD] [--provider {ibkr,quant-data,yahoo}] [--debug]",
+        usage="day-chart TICKER [--date YYYY-MM-DD | --start-date YYYY-MM-DD --end-date YYYY-MM-DD] [--provider {ibkr,quant-data,yahoo,databento}] [--debug]",
         description="Fetch full-day intraday bars for a stock ticker, pop up a price/volume chart, and export a CSV.",
     )
 
@@ -78,13 +81,14 @@ def parse_args(argv: list[str]) -> CliArguments:
     )
     parser.add_argument(
         "--provider",
-        choices=[PROVIDER_IBKR, PROVIDER_QUANT_DATA, PROVIDER_YAHOO],
+        choices=[PROVIDER_IBKR, PROVIDER_QUANT_DATA, PROVIDER_YAHOO, PROVIDER_DATABENTO],
         default=PROVIDER_IBKR,
         help=(
             f"intraday data source; '{PROVIDER_IBKR}' (default) has real extended-hours volume, "
             f"'{PROVIDER_QUANT_DATA}' reads the quant-data warehouse (Yahoo-sourced, no extended-hours volume), "
             f"'{PROVIDER_YAHOO}' hits Yahoo directly (same extended-hours gap as quant-data's ingest -- "
-            f"useful for comparing what's actually in the warehouse against the raw source, not for everyday use)"
+            f"useful for comparing what's actually in the warehouse against the raw source, not for everyday use), "
+            f"'{PROVIDER_DATABENTO}' hits Databento's consolidated equities feed (paid API key required)"
         ),
     )
     parser.add_argument(
@@ -181,6 +185,11 @@ def _build_provider(provider_name: str, settings: Settings) -> IntraDayProvider:
 
     if provider_name == PROVIDER_YAHOO:
         return YahooFinanceIntraDay()
+
+    if provider_name == PROVIDER_DATABENTO:
+        if settings.databento is None:
+            raise AppError("day-chart requires a 'databento' section in settings.json (or settings.local.json) with an apiKey to use --provider databento.")
+        return DatabentoIntraDay(api_key=settings.databento.api_key, dataset=settings.databento.dataset)
 
     if settings.postgres is None:
         raise AppError("day-chart requires a 'postgres' section in settings.json to reach quant-data.")

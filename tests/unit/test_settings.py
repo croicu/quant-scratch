@@ -103,6 +103,46 @@ def test_load_ibkr_section_fully_specified(tmp_path):
     assert settings.ibkr.client_id == 7
 
 
+def test_load_without_databento_section_defaults_to_none(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({"settings": {"debug": False}}), encoding="utf-8")
+
+    settings = Settings.load(path=settings_path, local_path=tmp_path / "settings.local.json")
+
+    assert settings.databento is None
+
+
+def test_load_databento_section_missing_api_key_raises(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({"settings": {"databento": {}}}), encoding="utf-8")
+
+    with pytest.raises(TaskError):
+        Settings.load(path=settings_path, local_path=tmp_path / "settings.local.json")
+
+
+def test_load_databento_section_defaults_dataset_when_omitted(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({"settings": {"databento": {"apiKey": "db-test-key"}}}), encoding="utf-8")
+
+    settings = Settings.load(path=settings_path, local_path=tmp_path / "settings.local.json")
+
+    assert settings.databento.api_key == "db-test-key"
+    assert settings.databento.dataset == "DBEQ.BASIC"
+
+
+def test_load_databento_section_fully_specified(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(
+        json.dumps({"settings": {"databento": {"apiKey": "db-test-key", "dataset": "XNAS.ITCH"}}}),
+        encoding="utf-8",
+    )
+
+    settings = Settings.load(path=settings_path, local_path=tmp_path / "settings.local.json")
+
+    assert settings.databento.api_key == "db-test-key"
+    assert settings.databento.dataset == "XNAS.ITCH"
+
+
 def test_load_without_window_section_defaults_to_none(tmp_path):
     settings_path = tmp_path / "settings.json"
     settings_path.write_text(json.dumps({"settings": {"debug": False}}), encoding="utf-8")

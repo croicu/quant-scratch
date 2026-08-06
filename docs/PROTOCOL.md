@@ -29,16 +29,16 @@ CLI signature and file format schemas for `quant-scratch`.
 
 ### `day-chart`
 
-- Usage: `day-chart TICKER [--date YYYY-MM-DD | --start-date YYYY-MM-DD --end-date YYYY-MM-DD] [--provider {ibkr,quant-data,yahoo}] [--debug]`
+- Usage: `day-chart TICKER [--date YYYY-MM-DD | --start-date YYYY-MM-DD --end-date YYYY-MM-DD] [--provider {ibkr,quant-data,yahoo,databento}] [--debug]`
 - Fetches full-day (pre-market + regular + after-market) 1-minute OHLCV bars for a single ticker
   (case-insensitive), pops up an interactive matplotlib chart window (one day, or several days'
   charts stacked horizontally — see below), and writes a CSV export to the current working
   directory. The command doesn't exit until you close the popup window; this is driven by polling
   the GUI event loop for the window's own close event, not `plt.show()`'s own blocking (which
   doesn't reliably block under a debugger).
-- `--provider {ibkr,quant-data,yahoo}`: which data source to fetch from. **Defaults to `ibkr`**
-  (`shared.providers.ibkr.IBKRIntraDay`, a local IB Gateway/TWS instance) — real trade volume
-  through pre-/after-market, unlike `quant-data`'s Yahoo-sourced gap (see
+- `--provider {ibkr,quant-data,yahoo,databento}`: which data source to fetch from. **Defaults to
+  `ibkr`** (`shared.providers.ibkr.IBKRIntraDay`, a local IB Gateway/TWS instance) — real trade
+  volume through pre-/after-market, unlike `quant-data`'s Yahoo-sourced gap (see
   `docs/ARCHITECTURE.md`). `quant-data` (`shared.providers.quant_data.QuantDataIntraDay`) reads the
   [quant-data](https://github.com/croicu/quant-data) warehouse instead — useful as a fallback if
   the local Gateway isn't running, or for dates further back than IBKR's lookback window. `yahoo`
@@ -46,12 +46,19 @@ CLI signature and file format schemas for `quant-scratch`.
   pre-/after-market zero-volume gap as `quant-data`'s ingest (confirmed: 315/315 pre-market bars
   zero-volume for a live SPY pull), so it isn't useful as an everyday source; exists specifically
   so you can compare a raw-source fetch against what's actually in the warehouse (e.g. checking
-  whether a metric's absence is a real gap in the source vs. an ingest gap).
+  whether a metric's absence is a real gap in the source vs. an ingest gap). `databento`
+  (`shared.providers.databento.DatabentoIntraDay`) hits Databento's consolidated equities feed
+  (`DBEQ.BASIC` by default, overridable via `Settings.databento.dataset`) — requires a paid API
+  key; added as an additional source alongside `ibkr`, not a default change, since IBKR already
+  covers the extended-hours-volume need this was originally evaluated for. Whether your
+  account/plan actually returns non-zero extended-hours volume for a given dataset is not
+  guaranteed by this tool — verify against your own Databento entitlements.
 - Requires either an `ibkr` section in `settings.json` (optional — see below, only needed to
   override the defaults) for `--provider ibkr`, a `postgres` section (required) for `--provider
   quant-data` (see `docs/PROTOCOL.md`'s settings notes below and quant-data's own
-  `docs/DATABASE.md` for connecting to the box), or nothing at all for `--provider yahoo` — a
-  missing required section is an `AppError` (exit `1`), same as any other fetch failure.
+  `docs/DATABASE.md` for connecting to the box), a `databento` section (required, `apiKey`) for
+  `--provider databento`, or nothing at all for `--provider yahoo` — a missing required section is
+  an `AppError` (exit `1`), same as any other fetch failure.
 - `--date YYYY-MM-DD`: single session date to fetch. Omit (and omit `--start-date`/`--end-date`) to
   default to today, or the last trading day (Friday) if today falls on a weekend. Rejected (exit
   `1`) if the date is malformed, in the future, or falls on a weekend. NYSE holidays are not
@@ -89,8 +96,9 @@ CLI signature and file format schemas for `quant-scratch`.
 - **`--provider quant-data` only**: always (no separate flag) also fetches quant-reconcile's
   pending-resolution ("stuck") bars for the charted range and draws them on the popup as
   candlesticks — red for the whistleblower provider's own OHLC values, blue for each candidate
-  provider's own OHLC values (see the popup section below). A silent no-op for `ibkr`/`yahoo` —
-  nothing to dispute for a raw single-source fetch. Never written to the CSV export.
+  provider's own OHLC values (see the popup section below). A silent no-op for
+  `ibkr`/`yahoo`/`databento` — nothing to dispute for a raw single-source fetch. Never written to
+  the CSV export.
 
 ### Settings: `ibkr` section (`settings.json` / `settings.local.json`)
 
@@ -168,6 +176,27 @@ The real hostname/`sshUser`/`sshKeyPath` are not secret in the sense of needing 
 they identify a specific private machine — keep this block in `settings.local.json` (gitignored),
 never the committed `settings.json`.
 
+### Settings: `databento` section (`settings.local.json` only — never commit)
+
+Required by `day-chart --provider databento` (see above). `apiKey` is a real secret (a paid
+Databento account credential), unlike `postgres`'s fields above, so this section must live in
+`settings.local.json` (gitignored) only — never the committed `settings.json`:
+
+```json
+{
+  "settings": {
+    "databento": {
+      "apiKey": "db-...",
+      "dataset": "DBEQ.BASIC"
+    }
+  }
+}
+```
+
+`dataset` is optional, defaulting to `"DBEQ.BASIC"` (Databento's consolidated multi-venue US
+equities feed) if omitted — override it if your account is entitled to a different dataset (e.g. a
+single-exchange feed like `"XNAS.ITCH"`).
+
 ### Settings: `window` section (`settings.local.json`, auto-managed — don't hand-edit)
 
 Optional. When present, `day-chart` opens its popup at this screen position instead of the OS
@@ -237,7 +266,7 @@ disambiguates which day a row belongs to; no separate `date` column is added):
 | `close` | float | |
 | `volume` | int | |
 | `session` | string | `"pre-market"`, `"regular"`, or `"after-market"` |
-| `incomplete` | bool | `True` if quant-data's provider couldn't supply full data for this bar (e.g. no pre/after-market volume). Always `False` for `--provider ibkr` — `IBKRIntraDay` has no equivalent flag, and a zero-volume bar from it is presumed genuinely no trades that minute, not missing data. |
+| `incomplete` | bool | `True` if quant-data's provider couldn't supply full data for this bar (e.g. no pre/after-market volume). Always `False` for `--provider ibkr`/`databento` — neither `IBKRIntraDay` nor `DatabentoIntraDay` has an equivalent flag, and a zero-volume bar from either is presumed genuinely no trades that minute, not missing data. |
 
 ### Day-chart popup window
 
