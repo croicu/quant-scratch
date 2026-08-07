@@ -38,6 +38,15 @@
       "justMyCode": false
     },
     {
+      "name": "Python: Run day-chart (CLI, ibkr, start date, end date)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "day_chart.cli",
+      "args": ["${input:ticker}", "--provider", "ibkr", "--start-date", "${input:startDate}", "--end-date", "${input:endDate}"],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
       "name": "Python: Run day-chart (CLI, databento, start date, end date)",
       "type": "debugpy",
       "request": "launch",
