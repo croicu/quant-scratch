@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from datetime import date, datetime, timezone
 
-from quant_data import OHLCV, MarketData, PendingResolutionBar, ProviderRole, create_postgres_provider
+from quant_data import OHLCV, DataQuality, MarketData, PendingResolutionBar, ProviderRole, create_postgres_provider
 
 from defs.protocols import BarConflict, DayBar, ProviderBar
 
@@ -36,7 +36,11 @@ def _ohlcv_to_daybar(ohlcv: OHLCV) -> DayBar:
         close=ohlcv.close,
         volume=ohlcv.volume,
         session=infer_session(timestamp_utc),
-        incomplete=ohlcv.incomplete,
+        # quant-data#32: OHLCV.incomplete (bool) became OHLCV.data_quality (DataQuality enum) --
+        # this is the documented direct equivalent of the old `incomplete` bool. REJECTED collapses
+        # into the same `incomplete=True` bucket as INCOMPLETE here; the rejected-vs-incomplete
+        # distinction is preserved separately via fetch_rejected_bars below, not lost.
+        incomplete=ohlcv.data_quality != DataQuality.ACCEPTED,
     )
 
 
@@ -165,3 +169,29 @@ class QuantDataIntraDay:
             category=CATEGORY_INTRADAY_FETCH,
         )
         return conflicts
+
+    def fetch_rejected_bars(self, ticker: str, start_date: date, end_date: date) -> list[ProviderBar]:
+        normalized_ticker = ticker.upper()
+
+        try:
+            # No perf wrapper here, same reasoning as fetch_bars above. Unlike fetch_conflicts,
+            # each entry here is independent -- no (timestamp, field_group) grouping needed, since
+            # a rejected-whistleblower bar isn't part of a whistleblower/candidate dispute (it
+            # already auto-resolved via Tier 1 and never became pending; quant-data#32).
+            rejected_entries = self._client.fetch_rejected_whistleblower_bars(normalized_ticker, start_date, end_date)
+        except Exception as error:
+            raise AppError(
+                f"Failed to fetch rejected whistleblower bars for '{normalized_ticker}' between "
+                f"{start_date.isoformat()} and {end_date.isoformat()} from quant-data: {error}"
+            ) from error
+
+        rejected_bars: list[ProviderBar] = []
+        for entry in rejected_entries:
+            rejected_bars.append(ProviderBar(provider=entry.provider, bar=_ohlcv_to_daybar(entry.bar)))
+
+        Logger.info(
+            f"day-chart: fetched {len(rejected_bars)} rejected whistleblower bar(s) for {normalized_ticker} between "
+            f"{start_date.isoformat()} and {end_date.isoformat()} from quant-data.",
+            category=CATEGORY_INTRADAY_FETCH,
+        )
+        return rejected_bars

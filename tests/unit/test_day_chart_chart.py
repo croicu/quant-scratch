@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
+import matplotlib.dates as mdates
 import pytest
 from matplotlib.backend_bases import CloseEvent, FigureCanvasBase
 from matplotlib.colors import to_rgba
@@ -51,6 +52,19 @@ def _conflict(hour_utc: int, minute_utc: int, candidate_count: int = 1) -> BarCo
     return BarConflict(field_group="ohlc", whistleblower=ProviderBar(provider="yfinance", bar=whistleblower_bar), candidates=candidates)
 
 
+def _rejected_bar(hour_utc: int, minute_utc: int) -> ProviderBar:
+    bar = DayBar(
+        timestamp=datetime(2026, 1, 2, hour_utc, minute_utc, tzinfo=timezone.utc),
+        open=469.0,
+        high=469.6,
+        low=468.5,
+        close=469.3,
+        volume=400,
+        session="regular",
+    )
+    return ProviderBar(provider="yfinance", bar=bar)
+
+
 def test_render_chart_returns_figure_with_price_and_volume_axes_for_one_day():
     bars = [
         _bar(9, 0, "pre-market"),
@@ -87,6 +101,14 @@ def _candle_bodies(price_axis) -> list[Rectangle]:
     bodies = []
     for patch in price_axis.patches:
         if isinstance(patch, Rectangle) and patch.get_gid() == chart._CONFLICT_CANDLE_GID:
+            bodies.append(patch)
+    return bodies
+
+
+def _rejected_candle_bodies(price_axis) -> list[Rectangle]:
+    bodies = []
+    for patch in price_axis.patches:
+        if isinstance(patch, Rectangle) and patch.get_gid() == chart._REJECTED_CANDLE_GID:
             bodies.append(patch)
     return bodies
 
@@ -141,6 +163,105 @@ def test_render_chart_draws_one_candlestick_per_candidate():
     chart.plt.close(figure)
 
 
+def test_render_chart_draws_no_rejected_candlesticks_without_rejected_bars():
+    bars = [_bar(14, 30, "regular")]
+
+    figure = chart.render_chart("SPY", [(date(2026, 1, 2), bars)])
+
+    price_axis = figure.axes[0]
+    assert _rejected_candle_bodies(price_axis) == []
+    chart.plt.close(figure)
+
+
+def test_render_chart_draws_no_rejected_candlesticks_when_rejected_bars_is_empty_list():
+    bars = [_bar(14, 30, "regular")]
+
+    figure = chart.render_chart("SPY", [(date(2026, 1, 2), bars)], None, [])
+
+    price_axis = figure.axes[0]
+    assert _rejected_candle_bodies(price_axis) == []
+    chart.plt.close(figure)
+
+
+def test_render_chart_draws_one_orange_candlestick_per_rejected_bar():
+    bars = [_bar(14, 30, "regular")]
+    rejected_bars = [_rejected_bar(14, 30), _rejected_bar(15, 0)]
+
+    figure = chart.render_chart("SPY", [(date(2026, 1, 2), bars)], None, rejected_bars)
+
+    price_axis = figure.axes[0]
+    bodies = _rejected_candle_bodies(price_axis)
+    assert len(bodies) == 2
+
+    colors = []
+    for body in bodies:
+        colors.append(body.get_facecolor())
+    assert colors == [to_rgba(chart._REJECTED_COLOR), to_rgba(chart._REJECTED_COLOR)]
+    chart.plt.close(figure)
+
+
+def test_render_chart_positions_rejected_candlestick_within_its_own_minute():
+    # Regression: a rejected bar's minute already has a real resolved black candle (unlike a
+    # conflict's pending whistleblower minute, which has none), so the offset must stay under a
+    # full minute -- otherwise the rejected candle visually drifts onto the *next* minute's slot,
+    # looking like the wrong bar was flagged.
+    bars = [_bar(14, 30, "regular")]
+    rejected_bars = [_rejected_bar(14, 30)]
+
+    figure = chart.render_chart("SPY", [(date(2026, 1, 2), bars)], None, rejected_bars)
+
+    price_axis = figure.axes[0]
+    bodies = _rejected_candle_bodies(price_axis)
+    assert len(bodies) == 1
+
+    own_timestamp_et = datetime(2026, 1, 2, 14, 30, tzinfo=timezone.utc).astimezone(chart.EASTERN)
+    own_x = mdates.date2num(own_timestamp_et)
+    body_center_x = bodies[0].get_x() + bodies[0].get_width() / 2
+    one_minute_in_days = 1 / (24 * 60)
+    assert body_center_x - own_x < one_minute_in_days
+    chart.plt.close(figure)
+
+
+def test_render_chart_only_draws_rejected_bars_on_their_own_day():
+    bars_day_1 = [_bar(14, 30, "regular")]
+    bars_day_2 = [
+        DayBar(
+            timestamp=datetime(2026, 1, 5, 14, 30, tzinfo=timezone.utc),
+            open=470.0,
+            high=470.5,
+            low=469.8,
+            close=470.2,
+            volume=1000,
+            session="regular",
+        )
+    ]
+    days = [(date(2026, 1, 2), bars_day_1), (date(2026, 1, 5), bars_day_2)]
+    rejected_bars = [_rejected_bar(14, 30)]  # timestamped 2026-01-02
+
+    figure = chart.render_chart("SPY", days, None, rejected_bars)
+
+    day_1_price_axis = figure.axes[0]
+    day_2_price_axis = figure.axes[2]  # axes ordering: [day1 price, day1 volume, day2 price, day2 volume]
+    assert len(_rejected_candle_bodies(day_1_price_axis)) == 1
+    assert len(_rejected_candle_bodies(day_2_price_axis)) == 0
+    chart.plt.close(figure)
+
+
+def test_render_chart_draws_conflicts_and_rejected_bars_independently():
+    # Conflict and rejected-bar candlesticks use distinct gids -- both can be present on the same
+    # chart without one query picking up the other's patches.
+    bars = [_bar(14, 30, "regular")]
+    conflicts = [_conflict(14, 30, candidate_count=1)]
+    rejected_bars = [_rejected_bar(15, 0)]
+
+    figure = chart.render_chart("SPY", [(date(2026, 1, 2), bars)], conflicts, rejected_bars)
+
+    price_axis = figure.axes[0]
+    assert len(_candle_bodies(price_axis)) == 2
+    assert len(_rejected_candle_bodies(price_axis)) == 1
+    chart.plt.close(figure)
+
+
 def test_render_chart_only_draws_conflicts_on_their_own_day():
     bars_day_1 = [_bar(14, 30, "regular")]
     bars_day_2 = [
@@ -171,7 +292,7 @@ def test_show_chart_forwards_conflicts_to_render_chart(monkeypatch):
     conflicts = [_conflict(14, 30)]
     received = []
 
-    def fake_render_chart(ticker, days, passed_conflicts=None):
+    def fake_render_chart(ticker, days, passed_conflicts=None, passed_rejected_bars=None):
         received.append(passed_conflicts)
         real_figure = chart.plt.figure()
         return real_figure
@@ -189,6 +310,31 @@ def test_show_chart_forwards_conflicts_to_render_chart(monkeypatch):
     chart.show_chart("SPY", [(date(2026, 1, 2), bars)], conflicts)
 
     assert received == [conflicts]
+
+
+def test_show_chart_forwards_rejected_bars_to_render_chart(monkeypatch):
+    bars = [_bar(14, 30, "regular")]
+    rejected_bars = [_rejected_bar(14, 30)]
+    received = []
+
+    def fake_render_chart(ticker, days, passed_conflicts=None, passed_rejected_bars=None):
+        received.append(passed_rejected_bars)
+        real_figure = chart.plt.figure()
+        return real_figure
+
+    monkeypatch.setattr(chart, "render_chart", fake_render_chart)
+    monkeypatch.setattr(chart.plt, "switch_backend", lambda name: None)
+    monkeypatch.setattr(chart.plt, "show", lambda block=True: None)
+
+    def fake_start_event_loop(self, timeout=0):
+        close_event = CloseEvent("close_event", self)
+        self.callbacks.process("close_event", close_event)
+
+    monkeypatch.setattr(FigureCanvasBase, "start_event_loop", fake_start_event_loop)
+
+    chart.show_chart("SPY", [(date(2026, 1, 2), bars)], None, rejected_bars)
+
+    assert received == [rejected_bars]
 
 
 class _FakeWindow:
@@ -250,8 +396,8 @@ def _patch_show_chart_for_window_tests(
 
     real_render_chart = chart.render_chart
 
-    def render_chart_with_fake_window(ticker, days, conflicts=None):
-        figure = real_render_chart(ticker, days, conflicts)
+    def render_chart_with_fake_window(ticker, days, conflicts=None, rejected_bars=None):
+        figure = real_render_chart(ticker, days, conflicts, rejected_bars)
         figure.canvas.manager.window = fake_window
         return figure
 

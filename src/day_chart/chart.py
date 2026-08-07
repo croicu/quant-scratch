@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.figure import Figure  # noqa: E402
 from matplotlib.patches import Rectangle  # noqa: E402
 
-from defs.protocols import BarConflict, DayBar  # noqa: E402
+from defs.protocols import BarConflict, DayBar, ProviderBar  # noqa: E402
 from shared.diagnostics import CATEGORY_PERF_UI, Logger  # noqa: E402
 from shared.errors import AppError  # noqa: E402
 from shared.sessions import AFTER_MARKET, EASTERN, PRE_MARKET, REGULAR  # noqa: E402
@@ -36,9 +36,19 @@ _MAIN_CANDLE_COLOR = "black"
 _MAIN_CANDLE_GID = "main-candle-body"
 _WHISTLEBLOWER_COLOR = "#dc2626"
 _CANDIDATE_COLOR = "#2563eb"
+_REJECTED_COLOR = "#f59e0b"
 _CANDLE_WIDTH_DAYS = 0.6 / (24 * 60)  # narrower than a full minute, leaves a visible gap
 _CONFLICT_CANDLE_GID = "conflict-candle-body"
+_REJECTED_CANDLE_GID = "rejected-candle-body"
 _CANDLE_OFFSET_DAYS = 1.2 / (24 * 60)  # spacing between a whistleblower candle and each candidate
+# A conflict's whistleblower minute is never resolved into fact_market_data_1min (it's stuck
+# pending), so there's no real black candle at that timestamp for a >1-minute-offset candidate to
+# collide with. A rejected-whistleblower bar's minute is different: it *did* auto-resolve, so a
+# real black candle already sits at that exact timestamp -- reusing _CANDLE_OFFSET_DAYS (1.2min,
+# more than a full minute) visually dragged the rejected candle onto the *next* minute's slot
+# instead of its own (looked like an off-by-one shift against a real run of consecutive rejected
+# bars). Sub-minute so it stays paired with its own minute's candle instead.
+_REJECTED_OFFSET_DAYS = _CANDLE_WIDTH_DAYS
 
 # One day's worth of chart input: its session date plus that day's bars.
 DayChartData = tuple[date, list[DayBar]]
@@ -92,12 +102,17 @@ def _get_virtual_desktop_bounds(window) -> tuple[int, int, int, int]:
     return (0, 0, window.winfo_screenwidth(), window.winfo_screenheight())
 
 
-def show_chart(ticker: str, days: list[DayChartData], conflicts: list[BarConflict] | None = None) -> None:
+def show_chart(
+    ticker: str,
+    days: list[DayChartData],
+    conflicts: list[BarConflict] | None = None,
+    rejected_bars: list[ProviderBar] | None = None,
+) -> None:
     switch_start = perf_counter()
     plt.switch_backend(_INTERACTIVE_BACKEND)
     Logger.perf(f"switched to {_INTERACTIVE_BACKEND} backend", perf_counter() - switch_start)
 
-    figure = render_chart(ticker, days, conflicts)
+    figure = render_chart(ticker, days, conflicts, rejected_bars)
     # None for any backend without a real GUI window (e.g. Agg, used in tests) -- window
     # positioning is a TkAgg-specific nicety, not something every backend needs to support.
     window = getattr(figure.canvas.manager, "window", None)
@@ -211,11 +226,17 @@ def show_chart(ticker: str, days: list[DayChartData], conflicts: list[BarConflic
     plt.close(figure)
 
 
-def render_chart(ticker: str, days: list[DayChartData], conflicts: list[BarConflict] | None = None) -> Figure:
+def render_chart(
+    ticker: str,
+    days: list[DayChartData],
+    conflicts: list[BarConflict] | None = None,
+    rejected_bars: list[ProviderBar] | None = None,
+) -> Figure:
     if not days:
         raise AppError(f"Cannot render chart for '{ticker}': no days provided.")
 
     active_conflicts = [] if conflicts is None else conflicts
+    active_rejected_bars = [] if rejected_bars is None else rejected_bars
     render_start = perf_counter()
 
     figure, axes = plt.subplots(
@@ -262,6 +283,11 @@ def render_chart(ticker: str, days: list[DayChartData], conflicts: list[BarConfl
             if conflict_timestamp_et.date() == session_date:
                 _draw_conflict(price_axis, conflict, conflict_timestamp_et)
 
+        for rejected_bar in active_rejected_bars:
+            rejected_timestamp_et = rejected_bar.bar.timestamp.astimezone(EASTERN)
+            if rejected_timestamp_et.date() == session_date:
+                _draw_rejected_bar(price_axis, rejected_bar, rejected_timestamp_et)
+
         session_start = datetime.combine(session_date, time.min, tzinfo=EASTERN)
         session_end = session_start + timedelta(days=1)
         volume_axis.set_xlim(session_start, session_end)
@@ -281,6 +307,17 @@ def _draw_conflict(axis, conflict: BarConflict, timestamp_et: datetime) -> None:
     for candidate_index, candidate in enumerate(conflict.candidates):
         offset = timedelta(days=_CANDLE_OFFSET_DAYS * (candidate_index + 1))
         _draw_candlestick(axis, timestamp_et + offset, candidate.bar, _CANDIDATE_COLOR, _CONFLICT_CANDLE_GID)
+
+
+def _draw_rejected_bar(axis, rejected_bar: ProviderBar, timestamp_et: datetime) -> None:
+    # A rejected-whistleblower bar (quant-data#32) isn't part of a whistleblower/candidate dispute
+    # -- it already auto-resolved via Tier 1 and never became pending, so there's no "other side"
+    # to fan out here the way _draw_conflict does. One offset candle is enough to keep it visually
+    # distinct from the main (black) candle at the same timestamp. Uses _REJECTED_OFFSET_DAYS, not
+    # _CANDLE_OFFSET_DAYS -- see that constant's own comment for why conflicts and rejected bars
+    # need different-sized offsets.
+    offset = timedelta(days=_REJECTED_OFFSET_DAYS)
+    _draw_candlestick(axis, timestamp_et + offset, rejected_bar.bar, _REJECTED_COLOR, _REJECTED_CANDLE_GID)
 
 
 def _draw_candlestick(axis, timestamp_et: datetime, bar: DayBar, color: str, gid: str) -> None:

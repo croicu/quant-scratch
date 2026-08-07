@@ -4,7 +4,7 @@ import json
 from datetime import date, datetime
 from pathlib import Path
 
-from defs.protocols import BarConflict, DayBar
+from defs.protocols import BarConflict, DayBar, ProviderBar
 from shared.errors import AppError
 from shared.sessions import infer_session
 
@@ -49,4 +49,10 @@ class MockQuantDataIntraDay:
         # method to exist (day-chart always calls it for --provider quant-data); real grouping/
         # validation logic is covered directly against QuantDataIntraDay in
         # tests/unit/test_quant_data_provider.py.
+        return []
+
+    def fetch_rejected_bars(self, ticker: str, start_date: date, end_date: date) -> list[ProviderBar]:
+        # Same reasoning as fetch_conflicts above -- no fixture data yet (quant-scratch#16's
+        # rejected-whistleblower-bar handling is deferred until quant-data's own outlier-detection
+        # check ships real REJECTED data), this just needs to exist for CLI-level tests.
         return []

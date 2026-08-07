@@ -3,9 +3,9 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 
 import pytest
-from quant_data import OHLCV, PendingResolutionBar, ProviderRole
+from quant_data import OHLCV, DataQuality, PendingResolutionBar, ProviderRole, RejectedWhistleblowerBar
 
-from defs.protocols import BarConflict, DayBar
+from defs.protocols import BarConflict, DayBar, ProviderBar
 from shared.diagnostics import Logger
 from shared.errors import AppError
 from shared.providers import quant_data as quant_data_module
@@ -17,13 +17,16 @@ class FakeMarketData:
         self,
         bars: list[OHLCV] | None = None,
         pending_bars: list[PendingResolutionBar] | None = None,
+        rejected_bars: list[RejectedWhistleblowerBar] | None = None,
         error: Exception | None = None,
     ):
         self._bars = bars if bars is not None else []
         self._pending_bars = pending_bars if pending_bars is not None else []
+        self._rejected_bars = rejected_bars if rejected_bars is not None else []
         self._error = error
         self.requested: tuple[str, date, date] | None = None
         self.pending_requested: tuple[str, date, date] | None = None
+        self.rejected_requested: tuple[str, date, date] | None = None
 
     def fetch_bars(self, ticker: str, start_date: date, end_date: date) -> list[OHLCV]:
         self.requested = (ticker, start_date, end_date)
@@ -37,8 +40,14 @@ class FakeMarketData:
             raise self._error
         return self._pending_bars
 
+    def fetch_rejected_whistleblower_bars(self, ticker: str, start_date: date, end_date: date) -> list[RejectedWhistleblowerBar]:
+        self.rejected_requested = (ticker, start_date, end_date)
+        if self._error is not None:
+            raise self._error
+        return self._rejected_bars
 
-def _ohlcv(hour_utc: int, minute_utc: int, close: float) -> OHLCV:
+
+def _ohlcv(hour_utc: int, minute_utc: int, close: float, data_quality: DataQuality = DataQuality.ACCEPTED) -> OHLCV:
     return OHLCV(
         ticker="SPY",
         timestamp=datetime(2026, 1, 2, hour_utc, minute_utc, tzinfo=timezone.utc),
@@ -47,7 +56,7 @@ def _ohlcv(hour_utc: int, minute_utc: int, close: float) -> OHLCV:
         low=close,
         close=close,
         volume=1000,
-        incomplete=False,
+        data_quality=data_quality,
     )
 
 
@@ -62,7 +71,7 @@ def test_fetch_bars_converts_ohlcv_to_daybar_with_session_and_incomplete():
                 low=471.3,
                 close=472.1,
                 volume=250000,
-                incomplete=False,
+                data_quality=DataQuality.ACCEPTED,
             ),
             OHLCV(
                 ticker="SPY",
@@ -72,7 +81,7 @@ def test_fetch_bars_converts_ohlcv_to_daybar_with_session_and_incomplete():
                 low=469.8,
                 close=470.2,
                 volume=0,
-                incomplete=True,
+                data_quality=DataQuality.INCOMPLETE,
             ),
         ]
     )
@@ -87,6 +96,30 @@ def test_fetch_bars_converts_ohlcv_to_daybar_with_session_and_incomplete():
     assert bars[0].incomplete is False
     assert bars[1].session == "pre-market"
     assert bars[1].incomplete is True
+
+
+def test_fetch_bars_treats_rejected_data_quality_as_incomplete():
+    # DataQuality.REJECTED collapses into the same DayBar.incomplete=True bucket as INCOMPLETE --
+    # the rejected-vs-incomplete distinction lives separately in fetch_rejected_bars, not here.
+    fake_client = FakeMarketData(
+        bars=[
+            OHLCV(
+                ticker="SPY",
+                timestamp=datetime(2026, 1, 2, 14, 30, tzinfo=timezone.utc),
+                open=471.5,
+                high=472.4,
+                low=471.3,
+                close=472.1,
+                volume=250000,
+                data_quality=DataQuality.REJECTED,
+            ),
+        ]
+    )
+    provider = QuantDataIntraDay(client=fake_client)
+
+    bars = provider.fetch_bars("SPY", date(2026, 1, 2))
+
+    assert bars[0].incomplete is True
 
 
 def test_fetch_bars_treats_naive_timestamp_as_utc():
@@ -104,7 +137,7 @@ def test_fetch_bars_treats_naive_timestamp_as_utc():
                 low=471.3,
                 close=472.1,
                 volume=250000,
-                incomplete=False,
+                data_quality=DataQuality.ACCEPTED,
             ),
         ]
     )
@@ -131,7 +164,7 @@ def test_fetch_bars_raises_on_bar_outside_known_session_hours():
                 low=99.0,
                 close=100.5,
                 volume=858048,
-                incomplete=False,
+                data_quality=DataQuality.ACCEPTED,
             ),
             OHLCV(
                 ticker="SPY",
@@ -141,7 +174,7 @@ def test_fetch_bars_raises_on_bar_outside_known_session_hours():
                 low=471.3,
                 close=472.1,
                 volume=250000,
-                incomplete=False,
+                data_quality=DataQuality.ACCEPTED,
             ),
         ]
     )
@@ -306,3 +339,44 @@ def test_fetch_conflicts_requests_the_full_range():
     QuantDataIntraDay(client=fake_client).fetch_conflicts("spy", date(2026, 1, 2), date(2026, 1, 5))
 
     assert fake_client.pending_requested == ("SPY", date(2026, 1, 2), date(2026, 1, 5))
+
+
+def test_fetch_rejected_bars_converts_entries_to_provider_bars():
+    # No real data exercises data_quality=REJECTED yet (quant-scratch#16 -- deferred until
+    # quant-data's own outlier-detection check ships), so this only proves the wiring/conversion
+    # is correct against a mocked client, not real rejected data end-to-end.
+    rejected_bars = [
+        RejectedWhistleblowerBar(provider="yfinance", bar=_ohlcv(14, 30, 100.0, data_quality=DataQuality.REJECTED)),
+    ]
+    provider = QuantDataIntraDay(client=FakeMarketData(rejected_bars=rejected_bars))
+
+    result = provider.fetch_rejected_bars("spy", date(2026, 1, 2), date(2026, 1, 2))
+
+    assert len(result) == 1
+    assert isinstance(result[0], ProviderBar)
+    assert result[0].provider == "yfinance"
+    assert isinstance(result[0].bar, DayBar)
+    assert result[0].bar.close == 100.0
+
+
+def test_fetch_rejected_bars_returns_empty_list_when_none_rejected():
+    provider = QuantDataIntraDay(client=FakeMarketData(rejected_bars=[]))
+
+    result = provider.fetch_rejected_bars("SPY", date(2026, 1, 2), date(2026, 1, 2))
+
+    assert result == []
+
+
+def test_fetch_rejected_bars_raises_on_client_error():
+    provider = QuantDataIntraDay(client=FakeMarketData(error=RuntimeError("connection reset")))
+
+    with pytest.raises(AppError):
+        provider.fetch_rejected_bars("SPY", date(2026, 1, 2), date(2026, 1, 2))
+
+
+def test_fetch_rejected_bars_requests_the_full_range():
+    fake_client = FakeMarketData(rejected_bars=[])
+
+    QuantDataIntraDay(client=fake_client).fetch_rejected_bars("spy", date(2026, 1, 2), date(2026, 1, 5))
+
+    assert fake_client.rejected_requested == ("SPY", date(2026, 1, 2), date(2026, 1, 5))

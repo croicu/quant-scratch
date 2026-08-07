@@ -99,6 +99,14 @@ CLI signature and file format schemas for `quant-scratch`.
   provider's own OHLC values (see the popup section below). A silent no-op for
   `ibkr`/`yahoo`/`databento` — nothing to dispute for a raw single-source fetch. Never written to
   the CSV export.
+- **`--provider quant-data` only**: also always fetches quant-data's rejected-whistleblower bars
+  (a `yfinance` value flagged implausible by a per-provider quality check that auto-resolved
+  without ever becoming a pending-resolution dispute) and draws them as orange candlesticks on the
+  popup, using each bar's own real OHLC values (see the popup section below). Same silent no-op for
+  `ibkr`/`yahoo`/`databento`, never written to the CSV export. **Not yet exercised against real
+  data**: the quality check that sets this designation is still undesigned upstream in quant-data,
+  so this always renders nothing today — see
+  [issue #16](https://github.com/croicu/quant-scratch/issues/16).
 
 ### Settings: `ibkr` section (`settings.json` / `settings.local.json`)
 
@@ -266,7 +274,7 @@ disambiguates which day a row belongs to; no separate `date` column is added):
 | `close` | float | |
 | `volume` | int | |
 | `session` | string | `"pre-market"`, `"regular"`, or `"after-market"` |
-| `incomplete` | bool | `True` if quant-data's provider couldn't supply full data for this bar (e.g. no pre/after-market volume). Always `False` for `--provider ibkr`/`databento` — neither `IBKRIntraDay` nor `DatabentoIntraDay` has an equivalent flag, and a zero-volume bar from either is presumed genuinely no trades that minute, not missing data. |
+| `incomplete` | bool | `True` if quant-data's provider couldn't supply full data for this bar (e.g. no pre/after-market volume), or if a per-provider quality check flagged the value implausible (`DataQuality.REJECTED`, collapsed into the same `True` here — see the rejected-whistleblower-bar note above for where that distinction is actually surfaced). Always `False` for `--provider ibkr`/`databento` — neither `IBKRIntraDay` nor `DatabentoIntraDay` has an equivalent flag, and a zero-volume bar from either is presumed genuinely no trades that minute, not missing data. |
 
 ### Day-chart popup window
 
@@ -287,7 +295,10 @@ candlestick using the whistleblower provider's own OHLC values, plus one blue ca
 candidate provider using that candidate's own OHLC values — each candle plots its provider's real
 numbers directly, not a derived/combined value. The whistleblower candle sits at the bar's actual
 timestamp; candidate candles are offset slightly to its right so multiple candidates (rare today,
-but possible) stay visually distinct rather than fully overlapping.
+but possible) stay visually distinct rather than fully overlapping. Also one orange candlestick per
+rejected-whistleblower bar that falls on that panel's day, offset slightly right of its own real
+timestamp the same way a candidate candle is — currently always zero of these in practice, since no
+real data sets the underlying quality flag yet (see the CLI section above).
 
 ### Mock intraday bars fixture (`tests/data/quant_data_bars.json`)
 

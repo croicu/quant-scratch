@@ -9,7 +9,7 @@ from pathlib import Path
 from time import perf_counter
 
 from defs.contracts import IntraDayProvider
-from defs.protocols import BarConflict
+from defs.protocols import BarConflict, ProviderBar
 from shared.diagnostics import ConsoleLogSink, Logger
 from shared.errors import AppError
 from shared.providers import databento, yahoo_finance
@@ -43,7 +43,7 @@ PROVIDER_DATABENTO = databento.PROVIDER_NAME
 # reads), so this only applies to the ibkr provider.
 MAX_IBKR_RANGE_DAYS = 30
 
-ShowChartFn = Callable[[str, list[DayChartData], list[BarConflict]], None]
+ShowChartFn = Callable[[str, list[DayChartData], list[BarConflict], list[ProviderBar]], None]
 
 
 @dataclass
@@ -285,17 +285,20 @@ def main(
         # one call for the whole resolved range (not per-day) since fetch_conflicts already
         # accepts a range natively.
         conflicts: list[BarConflict] = []
+        rejected_bars: list[ProviderBar] = []
         if arguments.provider == PROVIDER_QUANT_DATA:
             if is_range_mode:
                 conflicts = active_provider.fetch_conflicts(normalized_ticker, session_dates[0], session_dates[-1])
+                rejected_bars = active_provider.fetch_rejected_bars(normalized_ticker, session_dates[0], session_dates[-1])
             else:
                 conflicts = active_provider.fetch_conflicts(normalized_ticker, session_date, session_date)
+                rejected_bars = active_provider.fetch_rejected_bars(normalized_ticker, session_date, session_date)
 
         all_bars = []
         for _, day_bars in days:
             all_bars.extend(day_bars)
 
-        active_show_chart(normalized_ticker, days, conflicts)
+        active_show_chart(normalized_ticker, days, conflicts, rejected_bars)
 
         write_start = perf_counter()
         csv_path.write_text(bars_to_csv(all_bars), encoding="utf-8", newline="")
