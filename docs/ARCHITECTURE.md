@@ -549,6 +549,79 @@ confined to `shared/providers/quant_data.py`.
   ([issue #15](https://github.com/croicu/quant-scratch/issues/15),
   [issue #16](https://github.com/croicu/quant-scratch/issues/16)).
 
+### `open_quant_data` — Excel/Postgres SSH tunnel launcher
+
+Not a data-provider experiment like `stock_quote`/`day_chart` — no dependency on `defs` or
+`shared`'s providers at all; the only thing it shares with the rest of the repo is `shared.diagnostics`/`shared.errors`
+for `Logger`/`AppError`. Automates the manual "start a PuTTY tunnel, then open Excel" routine for
+querying [quant-data](https://github.com/croicu/quant-data)'s Postgres warehouse from Excel via
+Power Query/ODBC ([issue #19](https://github.com/croicu/quant-scratch/issues/19)).
+
+- `cli.py` — `open-quant-data` entry point. `start_tunnel(port_checker, process_launcher, sleep_fn,
+  session, port, timeout_sec)` launches `plink -load <session> -N -batch` (`-N` = forward only, no
+  remote shell; `-batch` = fail instead of prompting on an unrecognized host key) as a background
+  process and polls `localhost:<port>` until it accepts connections, returning the launched
+  `Popen` (or `None` if a tunnel was already up — nothing for the caller to manage in that case).
+  `port_checker`/`process_launcher`/`sleep_fn` are all injectable (default to real
+  socket/`subprocess.Popen`/`time.sleep`), same DI-over-monkeypatching pattern as
+  `shared/providers/databento.py`'s retry loop — lets `tests/unit/test_open_quant_data_cli.py`
+  exercise the already-up/fresh-launch/early-exit/timeout paths without a real socket, process, or
+  sleep. Raises `AppError` (not a bare exception) if `plink` exits before the tunnel comes up, or
+  if the timeout elapses — both point at running `plink` manually to see the underlying error.
+  `stop_tunnel(process)` terminates it if still running (a no-op for `None` or an already-exited
+  process), registered via `atexit.register` in `main()` so the tunnel doesn't outlive the script
+  even if `main()` never returns normally.
+
+  `open_spreadsheet(path, opener)` raises `AppError` if `path` doesn't exist, otherwise calls
+  `opener` (default `_default_opener`: `os.startfile` on Windows, `open`/`xdg-open` elsewhere) —
+  same injectable-for-tests shape, since the default opener has the real side effect of launching
+  Excel. **Take care never to let a test reach the real default opener with a fabricated file** —
+  discovered the hard way when an early version of `test_main_happy_path_returns_zero` didn't
+  inject a fake opener and the test suite ended up actually launching Excel against a placeholder
+  text file named `.xlsx`, popping a real "file format is not valid" dialog on the developer's
+  machine mid-test-run. Fixed by monkeypatching `cli._default_opener` in that test; every other
+  `main()`-level test either fails before reaching `open_spreadsheet` or injects a fake opener.
+
+  Takes the spreadsheet path as a required positional CLI argument rather than a hardcoded
+  constant, since more than one workbook may exist under `public/reports/`/`local/reports/` (see
+  their own notes below for the split between the two) — `.vscode/launch.json` exposes this as a
+  `pickString` input (`spreadsheet`) with one dropdown option per known workbook, rather than a
+  separate launch config per file the way `day-chart`'s per-provider configs work; each new
+  workbook just needs its path added to that input's `options` list. No `Settings`/`settings.json`
+  dependency at
+  all — `PLINK_SESSION`/`LOCAL_PORT`/`TUNNEL_TIMEOUT_SEC` are plain module constants, not
+  configurable per-machine, since the PuTTY session name and tunnel port are effectively fixed by
+  the one-time manual setup steps (`tasks/excel_postgres_ssh_automation.md` /
+  [issue #19](https://github.com/croicu/quant-scratch/issues/19)) rather than something a user
+  would reasonably override at runtime.
+
+  `main(argv, keep_alive)` blocks on `keep_alive` (default: print a message, then `time.sleep(60)`
+  in a loop until `KeyboardInterrupt`) after opening the tunnel and workbook, so Excel has
+  something to refresh against for the rest of the session — same DI-for-blocking-behavior shape
+  `day_chart.chart.show_chart`'s injection uses for its own popup-blocking call, letting tests pass
+  a no-op instead of actually blocking.
+
+  Deliberately holds no secret: the SSH tunnel's real remote hostname, port, and `.ppk` key live
+  only in the locally-saved PuTTY session (referenced here only by name, `PLINK_SESSION =
+  "quant-tunnel"`), never in this file, `settings.json`, or any workbook under
+  `public/reports/`/`local/reports/` — consistent with the existing rule against committing the
+  real quant-data box hostname anywhere (see quant-data's `docs/DATABASE.md` placeholders).
+
+### `public/reports/` and `local/reports/` — Excel workbooks
+
+Not source code — `.xlsx` workbooks opened by `open-quant-data`, each wired up via Power Query to
+the `quant-data-tunnel` ODBC DSN by *name* (not a raw connection string), so nothing under either
+folder carries the real SSH/DB connection details regardless of which one a workbook lives in.
+
+Split into two folders because Power Query embeds the actual fetched result set inside the `.xlsx`
+on every refresh — a file that changes size on every save bloats git history, since git can't
+meaningfully diff/delta zip-based formats (discovered when a real refreshed dashboard came back at
+769K after just one ticker/one week's worth of 1-minute bars). `public/reports/` (checked into
+git) holds only stable, deliberately never-refreshed example workbooks (`sample.xlsx`);
+`local/reports/` (gitignored, listed in `.gitignore`) holds real, actively-refreshed dashboards —
+each machine builds/refreshes its own copy there rather than committing them. See each folder's
+own `README.md`.
+
 ### Test doubles (`tests/`)
 
 - `tests/mocks/yahoo_finance.py` — `MockYahooFinance`, structurally implements the same

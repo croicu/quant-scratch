@@ -20,6 +20,7 @@ dependencies = [
 [project.scripts]
 stock-quote = "stock_quote.cli:main"
 day-chart = "day_chart.cli:main"
+open-quant-data = "open_quant_data.cli:main"
 
 [project.optional-dependencies]
 dev = [
