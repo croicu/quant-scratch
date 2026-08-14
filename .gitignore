@@ -24,6 +24,9 @@ __pycache__/
 # Local settings override (personal overrides, not committed)
 settings.local.json
 
+# Local-only files with real machine-specific/private details (never committed)
+/local/
+
 # Local data cache (see tasks/local_data_cache_firstratedata.md)
 /data/
 

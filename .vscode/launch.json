@@ -65,6 +65,15 @@
       "justMyCode": false
     },
     {
+      "name": "Python: Run open-quant-data (CLI)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "open_quant_data.cli",
+      "args": ["${workspaceFolder}/${input:spreadsheet}"],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
       "name": "Python: Run Unit Tests",
       "type": "debugpy",
       "request": "launch",
@@ -110,6 +119,16 @@
       "type": "promptString",
       "description": "Range end date (YYYY-MM-DD)",
       "default": "2026-07-30"
+    },
+    {
+      "id": "spreadsheet",
+      "type": "pickString",
+      "description": "Which workbook to open (add new entries here as you add spreadsheets under public/reports/ or local/reports/)",
+      "options": [
+        "public/reports/sample.xlsx",
+        "local/reports/SPY - Price and Volume.xlsx"
+      ],
+      "default": "public/reports/sample.xlsx"
     }
   ]
 }
