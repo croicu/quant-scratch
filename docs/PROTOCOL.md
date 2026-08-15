@@ -111,22 +111,25 @@ CLI signature and file format schemas for `quant-scratch`.
 ### `open-quant-data`
 
 - Usage: `open-quant-data SPREADSHEET`
-- Starts the `quant-tunnel` PuTTY SSH tunnel (skipping relaunch if local port `5433` already
-  accepts connections), opens the given `.xlsx` with the OS-associated app (Excel), then blocks —
-  keeping the tunnel alive so Excel has something to refresh against — until you press Ctrl+C,
-  which closes the tunnel and exits.
+- Opens its own SSH tunnel directly in Python (`sshtunnel`/`paramiko`, skipping relaunch if local
+  port `5433` already accepts connections — same mechanism `day-chart --provider quant-data`
+  already uses internally, no PuTTY/`plink` involved), opens the given `.xlsx` with the
+  OS-associated app (Excel), then blocks — keeping the tunnel alive so Excel has something to
+  refresh against — until Excel closes (polls for the `EXCEL.EXE` process; exits automatically once
+  it's gone), or you press Ctrl+C to close the tunnel and exit early without closing Excel yourself.
 - `SPREADSHEET`: path to an `.xlsx` workbook — either a stable checked-in example under
   `public/reports/` (e.g. `public/reports/sample.xlsx`) or an actively-refreshed, gitignored
   dashboard under `local/reports/` (e.g. `local/reports/SPY - Price and Volume.xlsx`; see
   `docs/ARCHITECTURE.md`'s note on why real dashboards live there instead). The workbook must
   already be wired up with a Power Query connection to the `quant-data-tunnel` ODBC DSN (one-time
   manual setup — see [issue #19](https://github.com/croicu/quant-scratch/issues/19)).
-- Requires a one-time manual setup, done outside this repo: PuTTY installed with a saved
-  `quant-tunnel` session (host key already cached), psqlODBC installed with a `quant-data-tunnel`
-  System DSN pointed at `localhost:5433`. Nothing about that setup is stored in this repo or in any
-  workbook — see `docs/ARCHITECTURE.md`'s `open_quant_data` entry.
-- Exit codes: `0` success, `1` the tunnel failed to come up (host key/auth failure, or timed out
-  after 15s) or the given spreadsheet path doesn't exist, `2` argument parsing error (missing
+- Requires a `postgres` section in `settings.local.json` with `sshUser`/`sshKeyPath` set (the same
+  section/fields `day-chart --provider quant-data`'s auto-tunnel reads — see that settings section
+  below), plus a one-time manual setup done outside this repo: psqlODBC installed with a
+  `quant-data-tunnel` System DSN pointed at `localhost:5433`. Nothing about the real hostname/key
+  is stored in this repo or in any workbook — see `docs/ARCHITECTURE.md`'s `open_quant_data` entry.
+- Exit codes: `0` success, `1` the tunnel failed to open (missing `sshUser`/`sshKeyPath`, SSH
+  auth/connection failure) or the given spreadsheet path doesn't exist, `2` argument parsing error (missing
   `SPREADSHEET`).
 
 ### Settings: `ibkr` section (`settings.json` / `settings.local.json`)

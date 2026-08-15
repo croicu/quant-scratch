@@ -126,7 +126,10 @@
       "description": "Which workbook to open (add new entries here as you add spreadsheets under public/reports/ or local/reports/)",
       "options": [
         "public/reports/sample.xlsx",
-        "local/reports/SPY - Price and Volume.xlsx"
+        "local/reports/SPY - Price and Volume.xlsx",
+        "local/reports/SPY - Staging.xlsx",
+        "local/reports/SPY - Pending Manual Resolution.xlsx",
+        "local/reports/SPY - Archive.xlsx"
       ],
       "default": "public/reports/sample.xlsx"
     }

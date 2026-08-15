@@ -551,26 +551,45 @@ confined to `shared/providers/quant_data.py`.
 
 ### `open_quant_data` — Excel/Postgres SSH tunnel launcher
 
-Not a data-provider experiment like `stock_quote`/`day_chart` — no dependency on `defs` or
-`shared`'s providers at all; the only thing it shares with the rest of the repo is `shared.diagnostics`/`shared.errors`
-for `Logger`/`AppError`. Automates the manual "start a PuTTY tunnel, then open Excel" routine for
-querying [quant-data](https://github.com/croicu/quant-data)'s Postgres warehouse from Excel via
-Power Query/ODBC ([issue #19](https://github.com/croicu/quant-scratch/issues/19)).
+Not a data-provider experiment like `stock_quote`/`day_chart` — no dependency on `defs` at all; it
+does depend on `shared.settings` (`Settings`/`PostgresSettings`) and `shared.diagnostics`/`shared.errors`
+for `Logger`/`AppError`. Automates the manual "open a tunnel, then open Excel" routine for querying
+[quant-data](https://github.com/croicu/quant-data)'s Postgres warehouse from Excel via Power
+Query/ODBC ([issue #19](https://github.com/croicu/quant-scratch/issues/19)).
 
-- `cli.py` — `open-quant-data` entry point. `start_tunnel(port_checker, process_launcher, sleep_fn,
-  session, port, timeout_sec)` launches `plink -load <session> -N -batch` (`-N` = forward only, no
-  remote shell; `-batch` = fail instead of prompting on an unrecognized host key) as a background
-  process and polls `localhost:<port>` until it accepts connections, returning the launched
-  `Popen` (or `None` if a tunnel was already up — nothing for the caller to manage in that case).
-  `port_checker`/`process_launcher`/`sleep_fn` are all injectable (default to real
-  socket/`subprocess.Popen`/`time.sleep`), same DI-over-monkeypatching pattern as
-  `shared/providers/databento.py`'s retry loop — lets `tests/unit/test_open_quant_data_cli.py`
-  exercise the already-up/fresh-launch/early-exit/timeout paths without a real socket, process, or
-  sleep. Raises `AppError` (not a bare exception) if `plink` exits before the tunnel comes up, or
-  if the timeout elapses — both point at running `plink` manually to see the underlying error.
-  `stop_tunnel(process)` terminates it if still running (a no-op for `None` or an already-exited
-  process), registered via `atexit.register` in `main()` so the tunnel doesn't outlive the script
-  even if `main()` never returns normally.
+- `cli.py` — `open-quant-data` entry point. `start_tunnel(postgres_settings, port_checker,
+  tunnel_factory, port)` opens its own SSH tunnel via `sshtunnel.SSHTunnelForwarder`/`paramiko`
+  directly — the same mechanism `quant-data`'s own internal auto-tunnel uses (its
+  `quant_data._internal.shared.transports.ssh_tunnel.SshTunnelTransport`, deliberately *not*
+  imported directly here since `_internal` isn't part of quant-data's stable public-surface
+  contract; this module reimplements the same small pattern instead). Originally shelled out to
+  PuTTY's `plink` against a manually-created saved session — replaced once it became clear the
+  same `Settings.postgres.ssh_user`/`ssh_key_path` fields `day-chart --provider quant-data` already
+  reads could open the tunnel directly in Python, eliminating PuTTY/`plink` entirely as a
+  dependency along with the one-time "install PuTTY, convert the key with PuTTYgen, save a
+  session, accept the host key interactively" setup ceremony issue #19 originally required.
+  Applies the same `paramiko.DSSKey = paramiko.RSAKey` shim quant-data's own transport module
+  applies, for the same reason (`sshtunnel` 0.4.0 unconditionally references the now-removed
+  `paramiko.DSSKey` while building an internal key-type lookup table, even for an ed25519-only
+  setup) — needed here too since this module opens its own `paramiko`-backed connection rather
+  than going through `quant_data`'s own import chain, which is where that shim would otherwise get
+  applied incidentally. Binds the local end to a **fixed** port (`LOCAL_PORT = 5433`), unlike
+  quant-data's own transport (which binds an OS-assigned ephemeral port, fine for a Python DB
+  client that reads back whatever port got assigned) — the ODBC DSN here is pre-configured in
+  Windows to always look for Postgres at this specific local address, so the port can't float.
+  Checks `port_checker` first and returns `None` (nothing for the caller to manage) if something's
+  already listening on `port` — same already-up/reuse behavior as before. Raises `AppError` if
+  `postgres_settings` is `None` or missing `ssh_user`/`ssh_key_path` (this tool's whole point is
+  opening its own tunnel, so those are required here even though they're optional for `day-chart`,
+  which can instead assume an already-running external tunnel). `port_checker`/`tunnel_factory`
+  are both injectable (default to a real socket check /
+  `SSHTunnelForwarder`-constructing-and-starting function) — same DI-over-monkeypatching pattern
+  used throughout this repo, letting `tests/unit/test_open_quant_data_cli.py` exercise the
+  already-up/missing-settings/opens-with-right-arguments paths without a real socket or SSH
+  connection. `stop_tunnel(tunnel)` calls `.stop()` (a no-op for `None`), registered via
+  `atexit.register` in `main()` so the tunnel doesn't outlive the script even if `main()` never
+  returns normally. Live-verified against the real box: tunnel opens, `psql` confirms a real query
+  succeeds through it, matching `day-chart --provider quant-data`'s already-proven connection path.
 
   `open_spreadsheet(path, opener)` raises `AppError` if `path` doesn't exist, otherwise calls
   `opener` (default `_default_opener`: `os.startfile` on Windows, `open`/`xdg-open` elsewhere) —
@@ -587,25 +606,33 @@ Power Query/ODBC ([issue #19](https://github.com/croicu/quant-scratch/issues/19)
   their own notes below for the split between the two) — `.vscode/launch.json` exposes this as a
   `pickString` input (`spreadsheet`) with one dropdown option per known workbook, rather than a
   separate launch config per file the way `day-chart`'s per-provider configs work; each new
-  workbook just needs its path added to that input's `options` list. No `Settings`/`settings.json`
-  dependency at
-  all — `PLINK_SESSION`/`LOCAL_PORT`/`TUNNEL_TIMEOUT_SEC` are plain module constants, not
-  configurable per-machine, since the PuTTY session name and tunnel port are effectively fixed by
-  the one-time manual setup steps (`tasks/excel_postgres_ssh_automation.md` /
-  [issue #19](https://github.com/croicu/quant-scratch/issues/19)) rather than something a user
-  would reasonably override at runtime.
+  workbook just needs its path added to that input's `options` list. `main()` loads `Settings` the
+  same DI'd-`settings_path` way `stock_quote.cli`/`day_chart.cli` do, reusing the same `postgres`
+  section those already read — no new settings surface introduced by this module.
 
-  `main(argv, keep_alive)` blocks on `keep_alive` (default: print a message, then `time.sleep(60)`
-  in a loop until `KeyboardInterrupt`) after opening the tunnel and workbook, so Excel has
-  something to refresh against for the rest of the session — same DI-for-blocking-behavior shape
-  `day_chart.chart.show_chart`'s injection uses for its own popup-blocking call, letting tests pass
-  a no-op instead of actually blocking.
+  `main(argv, keep_alive)` blocks on `keep_alive` (default `wait_for_excel_to_close`) after opening
+  the tunnel and workbook, so Excel has something to refresh against for the rest of the session —
+  same DI-for-blocking-behavior shape `day_chart.chart.show_chart`'s injection uses for its own
+  popup-blocking call, letting tests pass a no-op instead of actually blocking.
+  `wait_for_excel_to_close(is_excel_running, sleep_fn, startup_timeout_sec, poll_interval_sec)`
+  polls for the `EXCEL.EXE` process (`tasklist /FI "IMAGENAME eq EXCEL.EXE" /NH`, checking whether
+  the process name shows up in its output) rather than tracking a handle from `open_spreadsheet`'s
+  opener directly -- `os.startfile` is fire-and-forget and returns no process reference to wait on.
+  Waits for `EXCEL.EXE` to first *appear* (confirming Excel actually launched, within
+  `startup_timeout_sec`) before waiting for it to *disappear* again; if it never appears at all,
+  logs a warning and returns rather than blocking forever on a workbook that never actually opened.
+  `KeyboardInterrupt` still exits early without closing Excel yourself, same as before. This is a
+  whole-process check, not scoped to the specific workbook that was opened -- if other unrelated
+  `.xlsx` files are already open in the same Excel instance, the wait continues until *all* of them
+  close, not just the one `open-quant-data` opened. Same `is_excel_running`/`sleep_fn`
+  injectable-for-tests shape as `start_tunnel`'s `port_checker`/`sleep_fn`.
 
-  Deliberately holds no secret: the SSH tunnel's real remote hostname, port, and `.ppk` key live
-  only in the locally-saved PuTTY session (referenced here only by name, `PLINK_SESSION =
-  "quant-tunnel"`), never in this file, `settings.json`, or any workbook under
-  `public/reports/`/`local/reports/` — consistent with the existing rule against committing the
-  real quant-data box hostname anywhere (see quant-data's `docs/DATABASE.md` placeholders).
+  `cli.py` itself holds no secret: the real remote hostname, SSH username, and key path are read
+  from `Settings.postgres` at runtime, which only ever lives in `settings.local.json` (gitignored)
+  — same file `day-chart --provider quant-data` already relies on for the identical fields, never
+  the committed `settings.json` or any workbook under `public/reports/`/`local/reports/` —
+  consistent with the existing rule against committing the real quant-data box hostname anywhere
+  (see quant-data's `docs/DATABASE.md` placeholders).
 
 ### `public/reports/` and `local/reports/` — Excel workbooks
 
