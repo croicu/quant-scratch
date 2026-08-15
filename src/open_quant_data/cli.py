@@ -9,25 +9,43 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
-from shared.diagnostics import ConsoleLogSink, Logger, TelemetryLevel
-from shared.errors import AppError
+import paramiko
+
+# sshtunnel 0.4.0 (its latest PyPI release, last published 2021) unconditionally references
+# paramiko.DSSKey while building an internal key-type lookup table used to scan for default keys --
+# paramiko removed DSSKey (DSA key support) entirely in a later major version, since DSA is
+# deprecated/insecure. This crashes even though we're ed25519-only, because the lookup table is
+# built eagerly for every key type regardless of which one is actually in use. Shimming the
+# attribute (rather than downgrading paramiko to an EOL version with since-fixed CVEs) is the
+# standard workaround -- mirrors the same shim quant-data's own internal SSH transport applies.
+if not hasattr(paramiko, "DSSKey"):
+    paramiko.DSSKey = paramiko.RSAKey
+
+from sshtunnel import SSHTunnelForwarder  # noqa: E402
+
+from shared.diagnostics import ConsoleLogSink, Logger, TelemetryLevel  # noqa: E402
+from shared.errors import AppError  # noqa: E402
+from shared.settings import PostgresSettings, Settings  # noqa: E402
 
 CATEGORY_TUNNEL = "tunnel"
 
-# Name of the saved PuTTY session (see tasks/excel_postgres_ssh_automation.md / issue #19 for the
-# one-time manual setup). The remote host/port/key live only in that saved session, never here or
-# in any committed file.
-PLINK_SESSION = "quant-tunnel"
-# Local port the tunnel forwards to Postgres; must match the ODBC DSN's configured port.
+SSH_PORT = 22
+# Local port the tunnel binds to; must match the ODBC DSN's configured port. Fixed (not an
+# ephemeral OS-assigned port, unlike quant-data's own internal SSH transport) since the DSN is
+# pre-configured in Windows to always look for Postgres at this specific local address.
 LOCAL_PORT = 5433
-TUNNEL_TIMEOUT_SEC = 15.0
-TUNNEL_POLL_INTERVAL_SEC = 0.5
+
+EXCEL_PROCESS_NAME = "EXCEL.EXE"
+EXCEL_STARTUP_TIMEOUT_SEC = 15.0
+EXCEL_POLL_INTERVAL_SEC = 1.0
 
 PortChecker = Callable[[str, int], bool]
-ProcessLauncher = Callable[[str], subprocess.Popen]
+TunnelFactory = Callable[[str, str, str, int, int], SSHTunnelForwarder]
 Opener = Callable[[str], None]
 KeepAliveFn = Callable[[], None]
+ProcessRunningChecker = Callable[[], bool]
 
 
 @dataclass
@@ -54,54 +72,55 @@ def _port_is_open(host: str, port: int) -> bool:
         return sock.connect_ex((host, port)) == 0
 
 
-def _launch_plink(session: str) -> subprocess.Popen:
-    return subprocess.Popen(
-        ["plink", "-load", session, "-N", "-batch"],
-        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-    )
+def _open_tunnel(host: str, ssh_user: str, ssh_key_path: str, remote_port: int, local_port: int) -> SSHTunnelForwarder:
+    try:
+        tunnel = SSHTunnelForwarder(
+            (host, SSH_PORT),
+            ssh_username=ssh_user,
+            ssh_pkey=ssh_key_path,
+            remote_bind_address=("localhost", remote_port),
+            local_bind_address=("127.0.0.1", local_port),
+        )
+        tunnel.start()
+    except Exception as error:
+        raise AppError(f"Failed to open SSH tunnel to {host} as {ssh_user} (key: {ssh_key_path}): {error}") from error
+
+    return tunnel
 
 
 def start_tunnel(
+    postgres_settings: PostgresSettings | None,
     port_checker: PortChecker | None = None,
-    process_launcher: ProcessLauncher | None = None,
-    sleep_fn: Callable[[float], None] | None = None,
-    session: str = PLINK_SESSION,
+    tunnel_factory: TunnelFactory | None = None,
     port: int = LOCAL_PORT,
-    timeout_sec: float = TUNNEL_TIMEOUT_SEC,
-) -> subprocess.Popen | None:
-    """Launch plink using the saved PuTTY session, forwarding `port`. Returns the launched
-    process, or None if a tunnel was already up (nothing for the caller to manage)."""
+) -> SSHTunnelForwarder | None:
+    """Opens an SSH tunnel forwarding local `port` to Postgres on `postgres_settings`'s remote
+    box, using the same sshtunnel/paramiko mechanism quant-data's own auto-tunnel uses internally
+    -- no PuTTY/plink involved. Returns the opened tunnel, or None if `port` was already accepting
+    connections (nothing for the caller to manage)."""
     check_port = _port_is_open if port_checker is None else port_checker
-    launch = _launch_plink if process_launcher is None else process_launcher
-    sleep = time.sleep if sleep_fn is None else sleep_fn
+    open_tunnel = _open_tunnel if tunnel_factory is None else tunnel_factory
 
     if check_port("localhost", port):
         Logger.info(f"Tunnel already up on port {port}, reusing it.", category=CATEGORY_TUNNEL)
         return None
 
-    Logger.info(f"Starting SSH tunnel (session '{session}')...", category=CATEGORY_TUNNEL)
-    process = launch(session)
+    if postgres_settings is None or postgres_settings.ssh_user is None or postgres_settings.ssh_key_path is None:
+        raise AppError(
+            "open-quant-data needs a 'postgres' section in settings.local.json with 'sshUser'/'sshKeyPath' set "
+            "so it can open its own SSH tunnel -- see docs/PROTOCOL.md's 'postgres' settings section."
+        )
 
-    deadline = time.time() + timeout_sec
-    while time.time() < deadline:
-        if check_port("localhost", port):
-            Logger.info("Tunnel is up.", category=CATEGORY_TUNNEL)
-            return process
-        if process.poll() is not None:
-            raise AppError(
-                "plink exited before the tunnel came up. Run "
-                f"'plink -load {session} -N' manually to see the error "
-                "(likely an unrecognized host key or auth failure)."
-            )
-        sleep(TUNNEL_POLL_INTERVAL_SEC)
-
-    raise AppError(f"Tunnel didn't come up within {timeout_sec}s on port {port}.")
+    Logger.info(f"Opening SSH tunnel to {postgres_settings.host} as {postgres_settings.ssh_user}...", category=CATEGORY_TUNNEL)
+    tunnel = open_tunnel(postgres_settings.host, postgres_settings.ssh_user, postgres_settings.ssh_key_path, postgres_settings.port, port)
+    Logger.info("Tunnel is up.", category=CATEGORY_TUNNEL)
+    return tunnel
 
 
-def stop_tunnel(process: subprocess.Popen | None) -> None:
-    if process is not None and process.poll() is None:
+def stop_tunnel(tunnel: SSHTunnelForwarder | None) -> None:
+    if tunnel is not None:
         Logger.info("Closing SSH tunnel...", category=CATEGORY_TUNNEL)
-        process.terminate()
+        tunnel.stop()
 
 
 def _default_opener(path: str) -> None:
@@ -122,23 +141,68 @@ def open_spreadsheet(path: str, opener: Opener | None = None) -> None:
     open_with(path)
 
 
-def _wait_until_interrupted() -> None:
-    print("\nTunnel is running in the background. Leave this terminal open while you work in Excel. Press Ctrl+C here to close the tunnel and exit.")
+def _excel_is_running() -> bool:
+    result = subprocess.run(
+        ["tasklist", "/FI", f"IMAGENAME eq {EXCEL_PROCESS_NAME}", "/NH"],
+        capture_output=True,
+        text=True,
+    )
+    return EXCEL_PROCESS_NAME in result.stdout
+
+
+def wait_for_excel_to_close(
+    is_excel_running: ProcessRunningChecker | None = None,
+    sleep_fn: Callable[[float], None] | None = None,
+    startup_timeout_sec: float = EXCEL_STARTUP_TIMEOUT_SEC,
+    poll_interval_sec: float = EXCEL_POLL_INTERVAL_SEC,
+) -> None:
+    """Blocks until Excel closes. Waits for EXCEL.EXE to first appear (confirming it actually
+    launched) before waiting for it to disappear again -- if it never appears within
+    `startup_timeout_sec`, gives up waiting and returns rather than blocking forever."""
+    check_running = _excel_is_running if is_excel_running is None else is_excel_running
+    sleep = time.sleep if sleep_fn is None else sleep_fn
+
+    deadline = time.time() + startup_timeout_sec
+    started = False
+    while time.time() < deadline:
+        if check_running():
+            started = True
+            break
+        sleep(poll_interval_sec)
+
+    if not started:
+        Logger.warning(
+            f"Excel didn't appear to start within {startup_timeout_sec}s; exiting without waiting for it to close.",
+            category=CATEGORY_TUNNEL,
+        )
+        return
+
+    print("\nExcel is open. This will exit automatically once you close Excel (or press Ctrl+C to close the tunnel manually).")
     try:
-        while True:
-            time.sleep(60)
+        while check_running():
+            sleep(poll_interval_sec)
     except KeyboardInterrupt:
         pass
 
 
-def main(argv: list[str] | None = None, keep_alive: KeepAliveFn | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    keep_alive: KeepAliveFn | None = None,
+    settings_path: Path | None = None,
+) -> int:
     arguments = parse_args(sys.argv[1:] if argv is None else argv)
 
-    Logger.set_logger(ConsoleLogSink(min_level=TelemetryLevel.INFO))
-    wait = _wait_until_interrupted if keep_alive is None else keep_alive
     try:
-        process = start_tunnel()
-        atexit.register(stop_tunnel, process)
+        settings = Settings.load() if settings_path is None else Settings.load(path=settings_path)
+    except AppError as error:
+        print(f"open-quant-data: error: {error}", file=sys.stderr)
+        return 1
+
+    Logger.set_logger(ConsoleLogSink(min_level=TelemetryLevel.INFO))
+    wait = wait_for_excel_to_close if keep_alive is None else keep_alive
+    try:
+        tunnel = start_tunnel(settings.postgres)
+        atexit.register(stop_tunnel, tunnel)
 
         open_spreadsheet(arguments.spreadsheet)
 
