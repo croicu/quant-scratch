@@ -29,19 +29,23 @@ CLI signature and file format schemas for `quant-scratch`.
 
 ### `day-chart`
 
-- Usage: `day-chart TICKER [--date YYYY-MM-DD | --start-date YYYY-MM-DD --end-date YYYY-MM-DD] [--provider {ibkr,quant-data,yahoo,databento}] [--debug]`
+- Usage: `day-chart TICKER [--date YYYY-MM-DD | --start-date YYYY-MM-DD --end-date YYYY-MM-DD] [--provider {ibkr,quant-data,yahoo,databento,massive}] [--debug]`
 - Fetches full-day (pre-market + regular + after-market) 1-minute OHLCV bars for a single ticker
   (case-insensitive), pops up an interactive matplotlib chart window (one day, or several days'
   charts stacked horizontally — see below), and writes a CSV export to the current working
   directory. The command doesn't exit until you close the popup window; this is driven by polling
   the GUI event loop for the window's own close event, not `plt.show()`'s own blocking (which
   doesn't reliably block under a debugger).
-- `--provider {ibkr,quant-data,yahoo,databento}`: which data source to fetch from. **Defaults to
+- `--provider {ibkr,quant-data,yahoo,databento,massive}`: which data source to fetch from. **Defaults to
   `ibkr`** (`shared.providers.ibkr.IBKRIntraDay`, a local IB Gateway/TWS instance) — real trade
   volume through pre-/after-market, unlike `quant-data`'s Yahoo-sourced gap (see
   `docs/ARCHITECTURE.md`). `quant-data` (`shared.providers.quant_data.QuantDataIntraDay`) reads the
   [quant-data](https://github.com/croicu/quant-data) warehouse instead — useful as a fallback if
-  the local Gateway isn't running, or for dates further back than IBKR's lookback window. `yahoo`
+  the local Gateway isn't running, or for dates further back than IBKR's lookback window (not a
+  documented IBKR spec — empirically confirmed via `ibkr_fetch.validate` to reach back at least
+  ~20 years: a 2006-08-16 request still succeeds, though pre-market *coverage* narrows for older
+  dates even as the request itself keeps working — see `docs/ARCHITECTURE.md`'s `ibkr_fetch` notes
+  for the detail; not tested further back than that). `yahoo`
   (`shared.providers.yahoo_finance.YahooFinanceIntraDay`) hits Yahoo directly — has the same
   pre-/after-market zero-volume gap as `quant-data`'s ingest (confirmed: 315/315 pre-market bars
   zero-volume for a live SPY pull), so it isn't useful as an everyday source; exists specifically
@@ -52,12 +56,19 @@ CLI signature and file format schemas for `quant-scratch`.
   key; added as an additional source alongside `ibkr`, not a default change, since IBKR already
   covers the extended-hours-volume need this was originally evaluated for. Whether your
   account/plan actually returns non-zero extended-hours volume for a given dataset is not
-  guaranteed by this tool — verify against your own Databento entitlements.
+  guaranteed by this tool — verify against your own Databento entitlements. `massive`
+  (`shared.providers.massive.MassiveIntraDay`) hits Massive's (formerly Polygon.io) aggregates API
+  — unlike `databento`, works on a genuinely free tier; live-verified with zero zero-volume bars
+  across every session for a real SPY pull, better extended-hours coverage than IBKR itself showed
+  for a comparable recent date. Free-tier lookback is capped at 2 years (a plain HTTP 403 past
+  that, surfaced as a normal fetch-failure `AppError`); range mode is additionally capped at 5 days
+  regardless of lookback, due to the free tier's 5-calls/minute rate limit (see below).
 - Requires either an `ibkr` section in `settings.json` (optional — see below, only needed to
   override the defaults) for `--provider ibkr`, a `postgres` section (required) for `--provider
   quant-data` (see `docs/PROTOCOL.md`'s settings notes below and quant-data's own
   `docs/DATABASE.md` for connecting to the box), a `databento` section (required, `apiKey`) for
-  `--provider databento`, or nothing at all for `--provider yahoo` — a missing required section is
+  `--provider databento`, a `massive` section (required, `apiKey`) for `--provider massive`, or
+  nothing at all for `--provider yahoo` — a missing required section is
   an `AppError` (exit `1`), same as any other fetch failure.
 - `--date YYYY-MM-DD`: single session date to fetch. Omit (and omit `--start-date`/`--end-date`) to
   default to today, or the last trading day (Friday) if today falls on a weekend. Rejected (exit
@@ -86,12 +97,20 @@ CLI signature and file format schemas for `quant-scratch`.
     Not a measured breaking point, just an untested-but-documented one; a live probe of 7 rapid
     same-contract requests found no pacing violation well below this cap. Use `--provider
     quant-data` for longer ranges — no such constraint applies to Postgres reads.
+  - **`--provider massive` only**: a range longer than 5 days logs a warning about Massive's
+    free-tier 5-calls/minute limit (one API call per day in range mode, no throttling between
+    calls) but still proceeds — not a hard cap like `ibkr`'s. Originally a hard cap, relaxed after
+    live testing found the limit isn't strictly enforced in practice: a real 12-day range still
+    returned genuine data for 6 of the 12 days rather than failing outright. A day that hits a real
+    429 (rate-limited) is retried automatically (3 attempts, 15s apart) before being counted as
+    missing — a rate-limited day is a transient failure, not genuinely-no-data the way a weekend or
+    holiday is, so it isn't written off on the first failure the way those are.
 - `--debug` overrides `settings.json`'s `debug` flag; on failure with debug on, the underlying
   `AppError` is re-raised instead of being caught and printed.
-- Exit codes: `0` success, `1` invalid ticker / invalid date(s) / oversized `--provider ibkr` range /
-  no data available (for any day, in single-day mode; for every day, in range mode) / missing
-  required settings / connection error, `2` argument parsing error (argparse's default behavior on
-  missing/bad args).
+- Exit codes: `0` success, `1` invalid ticker / invalid date(s) / oversized `--provider ibkr` range
+  (`--provider massive` logs a warning instead, does not fail) / no data available (for any day, in
+  single-day mode; for every day, in range mode) / missing required settings / connection error,
+  `2` argument parsing error (argparse's default behavior on missing/bad args).
 - On success, prints the written CSV path to stdout (after you press Enter to close the popup).
 - **`--provider quant-data` only**: always (no separate flag) also fetches quant-reconcile's
   pending-resolution ("stuck") bars for the charted range and draws them on the popup as
@@ -228,6 +247,41 @@ Databento account credential), unlike `postgres`'s fields above, so this section
 `dataset` is optional, defaulting to `"DBEQ.BASIC"` (Databento's consolidated multi-venue US
 equities feed) if omitted — override it if your account is entitled to a different dataset (e.g. a
 single-exchange feed like `"XNAS.ITCH"`).
+
+### Settings: `alphaVantage` section (`settings.local.json` only — never commit)
+
+Kept as working code for possible future use, but not the active path — `massive` (below)
+replaced it after Alpha Vantage's free tier turned out not to cover the endpoints this needs (see
+`docs/ARCHITECTURE.md`). `apiKey` is a real secret (a free/paid-tier Alpha Vantage account
+credential), same reasoning as `databento` above — this section must live in `settings.local.json`
+(gitignored) only, never the committed `settings.json`:
+
+```json
+{
+  "settings": {
+    "alphaVantage": {
+      "apiKey": "..."
+    }
+  }
+}
+```
+
+### Settings: `massive` section (`settings.local.json` only — never commit)
+
+Required by `massive_fetch/validate.py` (see `docs/ARCHITECTURE.md`). `apiKey` is a real secret (a
+free-tier Massive/Polygon.io account credential), same reasoning as `databento`/`alphaVantage`
+above — this section must live in `settings.local.json` (gitignored) only, never the committed
+`settings.json`:
+
+```json
+{
+  "settings": {
+    "massive": {
+      "apiKey": "..."
+    }
+  }
+}
+```
 
 ### Settings: `window` section (`settings.local.json`, auto-managed — don't hand-edit)
 

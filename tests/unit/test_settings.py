@@ -143,6 +143,64 @@ def test_load_databento_section_fully_specified(tmp_path):
     assert settings.databento.dataset == "XNAS.ITCH"
 
 
+def test_load_without_alpha_vantage_section_defaults_to_none(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({"settings": {"debug": False}}), encoding="utf-8")
+
+    settings = Settings.load(path=settings_path, local_path=tmp_path / "settings.local.json")
+
+    assert settings.alpha_vantage is None
+
+
+def test_load_alpha_vantage_section_missing_api_key_raises(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({"settings": {"alphaVantage": {}}}), encoding="utf-8")
+
+    with pytest.raises(TaskError):
+        Settings.load(path=settings_path, local_path=tmp_path / "settings.local.json")
+
+
+def test_load_alpha_vantage_section_fully_specified(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(
+        json.dumps({"settings": {"alphaVantage": {"apiKey": "av-test-key"}}}),
+        encoding="utf-8",
+    )
+
+    settings = Settings.load(path=settings_path, local_path=tmp_path / "settings.local.json")
+
+    assert settings.alpha_vantage.api_key == "av-test-key"
+
+
+def test_load_without_massive_section_defaults_to_none(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({"settings": {"debug": False}}), encoding="utf-8")
+
+    settings = Settings.load(path=settings_path, local_path=tmp_path / "settings.local.json")
+
+    assert settings.massive is None
+
+
+def test_load_massive_section_missing_api_key_raises(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({"settings": {"massive": {}}}), encoding="utf-8")
+
+    with pytest.raises(TaskError):
+        Settings.load(path=settings_path, local_path=tmp_path / "settings.local.json")
+
+
+def test_load_massive_section_fully_specified(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(
+        json.dumps({"settings": {"massive": {"apiKey": "massive-test-key"}}}),
+        encoding="utf-8",
+    )
+
+    settings = Settings.load(path=settings_path, local_path=tmp_path / "settings.local.json")
+
+    assert settings.massive.api_key == "massive-test-key"
+
+
 def test_load_without_window_section_defaults_to_none(tmp_path):
     settings_path = tmp_path / "settings.json"
     settings_path.write_text(json.dumps({"settings": {"debug": False}}), encoding="utf-8")
