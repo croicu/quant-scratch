@@ -12,9 +12,10 @@ from defs.contracts import IntraDayProvider
 from defs.protocols import BarConflict, ProviderBar
 from shared.diagnostics import ConsoleLogSink, Logger
 from shared.errors import AppError
-from shared.providers import databento, yahoo_finance
+from shared.providers import databento, massive, yahoo_finance
 from shared.providers.databento import DatabentoIntraDay
 from shared.providers.ibkr import IBKRIntraDay
+from shared.providers.massive import MassiveIntraDay
 from shared.providers.quant_data import QuantDataIntraDay
 from shared.providers.yahoo_finance import YahooFinanceIntraDay
 from shared.settings import Settings
@@ -34,6 +35,17 @@ PROVIDER_QUANT_DATA = "quant-data"
 PROVIDER_YAHOO = yahoo_finance.PROVIDER_NAME
 # Same aliasing reasoning, against shared.providers.databento.PROVIDER_NAME.
 PROVIDER_DATABENTO = databento.PROVIDER_NAME
+# Same aliasing reasoning, against shared.providers.massive.PROVIDER_NAME.
+PROVIDER_MASSIVE = massive.PROVIDER_NAME
+
+# Massive's free Basic tier *documents* 5 API calls/minute. Range mode calls fetch_bars once per
+# day with no throttling between calls, so this was originally a hard cap (matching
+# MAX_IBKR_RANGE_DAYS's "untested-but-documented margin" reasoning) -- relaxed to a soft warning
+# after live testing (a 12-day range, well past this threshold) found the limit isn't strictly
+# enforced in practice: 6 of the 12 days still came back with real data rather than a hard
+# failure. Days that do get rate-limited still surface individually via the existing per-day skip
+# warning, same as any other per-day fetch failure -- no special handling needed for that case.
+MAX_MASSIVE_RANGE_DAYS = 5
 
 # IBKR's historical-data API enforces its own pacing limits (documented ceiling: 60 requests per
 # 10 minutes). Range mode calls fetch_bars once per day, so an unbounded range could plausibly
@@ -59,7 +71,10 @@ class CliArguments:
 def parse_args(argv: list[str]) -> CliArguments:
     parser = argparse.ArgumentParser(
         prog="day-chart",
-        usage="day-chart TICKER [--date YYYY-MM-DD | --start-date YYYY-MM-DD --end-date YYYY-MM-DD] [--provider {ibkr,quant-data,yahoo,databento}] [--debug]",
+        usage=(
+            "day-chart TICKER [--date YYYY-MM-DD | --start-date YYYY-MM-DD --end-date YYYY-MM-DD] "
+            "[--provider {ibkr,quant-data,yahoo,databento,massive}] [--debug]"
+        ),
         description="Fetch full-day intraday bars for a stock ticker, pop up a price/volume chart, and export a CSV.",
     )
 
@@ -81,14 +96,17 @@ def parse_args(argv: list[str]) -> CliArguments:
     )
     parser.add_argument(
         "--provider",
-        choices=[PROVIDER_IBKR, PROVIDER_QUANT_DATA, PROVIDER_YAHOO, PROVIDER_DATABENTO],
+        choices=[PROVIDER_IBKR, PROVIDER_QUANT_DATA, PROVIDER_YAHOO, PROVIDER_DATABENTO, PROVIDER_MASSIVE],
         default=PROVIDER_IBKR,
         help=(
             f"intraday data source; '{PROVIDER_IBKR}' (default) has real extended-hours volume, "
             f"'{PROVIDER_QUANT_DATA}' reads the quant-data warehouse (Yahoo-sourced, no extended-hours volume), "
             f"'{PROVIDER_YAHOO}' hits Yahoo directly (same extended-hours gap as quant-data's ingest -- "
             f"useful for comparing what's actually in the warehouse against the raw source, not for everyday use), "
-            f"'{PROVIDER_DATABENTO}' hits Databento's consolidated equities feed (paid API key required)"
+            f"'{PROVIDER_DATABENTO}' hits Databento's consolidated equities feed (paid API key required), "
+            f"'{PROVIDER_MASSIVE}' hits Massive's (formerly Polygon.io) free-tier aggregates API "
+            f"(real extended-hours volume; ranges over {MAX_MASSIVE_RANGE_DAYS} days log a warning "
+            f"about the free tier's 5-calls/minute limit but still proceed)"
         ),
     )
     parser.add_argument(
@@ -191,6 +209,11 @@ def _build_provider(provider_name: str, settings: Settings) -> IntraDayProvider:
             raise AppError("day-chart requires a 'databento' section in settings.json (or settings.local.json) with an apiKey to use --provider databento.")
         return DatabentoIntraDay(api_key=settings.databento.api_key, dataset=settings.databento.dataset)
 
+    if provider_name == PROVIDER_MASSIVE:
+        if settings.massive is None:
+            raise AppError("day-chart requires a 'massive' section in settings.json (or settings.local.json) with an apiKey to use --provider massive.")
+        return MassiveIntraDay(api_key=settings.massive.api_key)
+
     if settings.postgres is None:
         raise AppError("day-chart requires a 'postgres' section in settings.json to reach quant-data.")
     return QuantDataIntraDay(
@@ -255,6 +278,20 @@ def main(
                     f"Range of {len(session_dates)} days exceeds the {MAX_IBKR_RANGE_DAYS}-day cap for "
                     f"--provider {PROVIDER_IBKR} (IBKR historical-data pacing limits, untested past this size -- "
                     f"use --provider {PROVIDER_QUANT_DATA} for longer ranges)."
+                )
+
+            if arguments.provider == PROVIDER_MASSIVE and len(session_dates) > MAX_MASSIVE_RANGE_DAYS:
+                # A warning, not a hard block, unlike IBKR's cap above -- live testing found
+                # Massive's free-tier 5-calls/minute limit isn't strictly enforced in practice
+                # (a 12-day range returned real data for 6 of the 12 days, not a hard failure), so
+                # a soft heads-up is more honest than blocking a range that might actually work.
+                # Days that do get rate-limited still surface individually via the per-day skip
+                # warning below (category date_range), same as any other per-day fetch failure.
+                Logger.warning(
+                    f"Range of {len(session_dates)} days exceeds the {MAX_MASSIVE_RANGE_DAYS}-day soft limit for "
+                    f"--provider {PROVIDER_MASSIVE} (Massive's free-tier 5-calls/minute limit) -- "
+                    "some days may come back empty if rate-limited; proceeding anyway.",
+                    category=CATEGORY_DATE_RANGE,
                 )
 
             days: list[DayChartData] = []

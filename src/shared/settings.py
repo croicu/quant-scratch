@@ -50,6 +50,20 @@ class DatabentoSettings:
 
 
 @dataclass
+class AlphaVantageSettings:
+    # Same reasoning as DatabentoSettings.api_key -- a paid/free-tier account credential, no
+    # usable local default.
+    api_key: str
+
+
+@dataclass
+class MassiveSettings:
+    # Same reasoning as AlphaVantageSettings.api_key -- Massive (formerly Polygon.io)'s free-tier
+    # account credential, no usable local default.
+    api_key: str
+
+
+@dataclass
 class Settings:
     debug: bool
     logging: TelemetryLevel = TelemetryLevel.ERROR
@@ -58,6 +72,8 @@ class Settings:
     postgres: PostgresSettings | None = None
     ibkr: IBKRSettings | None = None
     databento: DatabentoSettings | None = None
+    alpha_vantage: AlphaVantageSettings | None = None
+    massive: MassiveSettings | None = None
     window: WindowSettings | None = None
 
     _instance: ClassVar[Settings | None] = None
@@ -183,6 +199,24 @@ class Settings:
                 dataset=str(databento_payload.get("dataset", default_databento.dataset)),
             )
 
+        alpha_vantage_settings: AlphaVantageSettings | None = None
+        alpha_vantage_payload = settings_payload.get("alphaVantage")
+        if alpha_vantage_payload is not None:
+            if not isinstance(alpha_vantage_payload, dict):
+                raise TaskError("'settings.alphaVantage' must be a JSON object.")
+            if "apiKey" not in alpha_vantage_payload:
+                raise TaskError("'settings.alphaVantage' is missing required key(s): apiKey")
+            alpha_vantage_settings = AlphaVantageSettings(api_key=str(alpha_vantage_payload["apiKey"]))
+
+        massive_settings: MassiveSettings | None = None
+        massive_payload = settings_payload.get("massive")
+        if massive_payload is not None:
+            if not isinstance(massive_payload, dict):
+                raise TaskError("'settings.massive' must be a JSON object.")
+            if "apiKey" not in massive_payload:
+                raise TaskError("'settings.massive' is missing required key(s): apiKey")
+            massive_settings = MassiveSettings(api_key=str(massive_payload["apiKey"]))
+
         window_settings: WindowSettings | None = None
         window_payload = settings_payload.get("window")
         if window_payload is not None:
@@ -204,6 +238,8 @@ class Settings:
             postgres=postgres_settings,
             ibkr=ibkr_settings,
             databento=databento_settings,
+            alpha_vantage=alpha_vantage_settings,
+            massive=massive_settings,
             window=window_settings,
         )
 

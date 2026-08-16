@@ -132,6 +132,11 @@ and has no CLI/console script of its own.
   `postgres` and unlike `ibkr`, `api_key` has no usable default (a paid-account credential, not a
   local service), so an empty `databento` object still raises `TaskError`. Meant to live in
   `settings.local.json` only (gitignored), never the committed `settings.json`, since it's a secret.
+  Also `AlphaVantageSettings` (`api_key` required, no other fields) and a `Settings.alpha_vantage`
+  field, same required-`api_key`/secret/`settings.local.json`-only shape as `databento` — parsed
+  from an optional `alphaVantage` object (JSON key `apiKey`). Also `MassiveSettings` (`api_key`
+  required, no other fields) and a `Settings.massive` field, identical shape again — parsed from an
+  optional `massive` object (JSON key `apiKey`).
 - `errors.py` — `AppError`, `TaskError`, `telemetry_session()`
 - `sessions.py` — `infer_session(timestamp_utc) -> str`, classifying a UTC timestamp into
   `"pre-market"` (4:00–9:30 ET), `"regular"` (9:30–16:00 ET), or `"after-market"` (16:00–20:00 ET);
@@ -338,6 +343,115 @@ itself is unit-tested; this script is just a thin manual harness around it) -- r
 `python -m ibkr_fetch.validate [TICKER] [YYYY-MM-DD]` against a running Gateway/TWS instance.
 Defaults to `SPY`/`2026-07-31`, the task's original validation scope.
 
+**Historical lookback, confirmed live**: not a documented IBKR spec (unlike Massive's clean
+per-tier-in-years pricing page), but reaches back at least ~20 years -- a real SPY 2006-08-16 call
+still succeeds (780 bars), not tested further back than that. The request succeeding is not the
+same as full coverage, though: unlike a 2012-08-14 call (full 960-bar session, pre-market starting
+at the usual 04:00 ET), the 2006-08-16 session's pre-market data only starts at 07:00 ET (150 bars
+instead of 330) -- IBKR's actual extended-hours *coverage* narrows for older dates even as the
+request itself keeps working, not just its zero-volume density. Zero-volume bar counts were also
+noticeably higher for both older dates (2012: 180/330 pre-market, 85/240 after-market; 2006:
+42/150 pre-market, 180/240 after-market) than for a comparable recent date (20/330 pre-market —
+see `CLAUDE.md`'s Completed Tasks for that figure's original source) -- plausibly reflecting
+genuinely thinner extended-hours trading activity in earlier years versus 2026, not a
+data-quality regression in IBKR's own coverage; not confirmed either way.
+
+### `alpha_vantage_fetch` -- manual pipeline-fetch script (not a registered CLI)
+
+Built for [issue #23](https://github.com/croicu/quant-scratch/issues/23)
+(`tasks/alpha_vantage_integration.md`). Originally scoped as a comparison tool against IBKR's own
+extended-hours daily bars (checking whether IBKR's smoothness reflects genuine coverage or lossy
+aggregation) -- descoped mid-implementation to a plain fetch-and-display script, same "not a
+registered CLI" shape as `ibkr_fetch` and now structured identically to it, right down to the
+`(ticker, target_date)` signature: `validate.py`'s `main(argv)` is a thin, untested harness
+(`python -m alpha_vantage_fetch.validate [TICKER] [YYYY-MM-DD]`, defaults `SPY`/`2026-07-31` --
+same defaults `ibkr_fetch/validate.py` uses) around
+`shared.providers.alpha_vantage.AlphaVantageIntraDay` (tested, alongside the other providers).
+Prints the exact same `_spot_check` summary shape `ibkr_fetch/validate.py` prints (total bars,
+first/last timestamp, per-session bar and zero-volume counts) and writes a CSV via
+`day_chart.output.bars_to_csv` (reused as-is, same schema, no new format -- works directly since
+`AlphaVantageIntraDay.fetch_bars` returns `list[DayBar]`, identical to every other provider). The
+IBKR-comparison aggregation/join logic originally built for this was cut entirely, not merely
+unused -- if a comparison is wanted later, it's a separate task, not dead code sitting here
+unused.
+
+`shared/providers/alpha_vantage.py` -- `AlphaVantageIntraDay.fetch_bars(ticker, target_date) ->
+list[DayBar]`, wrapping the `TIME_SERIES_INTRADAY` endpoint at a fixed `interval=1min` (module
+constant `INTERVAL`, not yet exposed as a constructor/settings option -- matches the
+reconciliation grain the rest of this repo's providers use; may become configurable later if a
+coarser interval is ever needed again for a bounded aggregation use case), `extended_hours=true`,
+`outputsize=full`, `adjusted=false` (raw as-traded values). Alpha Vantage has no single-day fetch
+-- `month` (`YYYY-MM`, derived from `target_date`) is the finest-grained scope it offers, so
+`fetch_bars` requests the whole month and filters the returned bars down to `target_date` itself
+before returning, raising `AppError` (`"No data available for '{ticker}' on {date}."`, matching
+`IBKRIntraDay`'s own wording) if none remain after filtering. Reuses `defs.protocols.DayBar` (not
+a new type) for parity with every other provider here, `session` inferred via
+`shared.sessions.infer_session`. `request_fn: Callable[[dict], dict] | None` is injectable
+(defaults to a real `requests.get(...).json()` call), same DI-over-monkeypatching pattern as
+`shared/providers/databento.py`. Raises `AppError` for Alpha Vantage's own error-response shapes
+(`"Error Message"`/`"Note"`/`"Information"` keys instead of HTTP status codes) as well as an
+unexpected response shape or a request-level exception. **Live-verified as broken, not just
+unverified**: `TIME_SERIES_INTRADAY` (and even `TIME_SERIES_DAILY`) turned out to require a paid
+Alpha Vantage plan on the account tested against -- confirmed empirically (isolated by testing
+`GLOBAL_QUOTE`, which worked fine, against the same key), not merely a documentation gap. This
+provider is kept as working, tested code for possible future use (per user request), but is not
+the active path forward -- see `massive_fetch` below, which replaced it.
+
+### `massive_fetch` -- manual pipeline-fetch script (not a registered CLI)
+
+Built for the same [issue #23](https://github.com/croicu/quant-scratch/issues/23), replacing
+`alpha_vantage_fetch` after Alpha Vantage's free tier turned out not to cover intraday/daily time
+series at all (see that module's note above). Massive (formerly Polygon.io -- `polygon.io` now
+301-redirects to `massive.com`, confirmed as a genuine rebrand via the same API URL shape
+continuing under the new domain, not a hijack) offers 1-minute bars with full extended-hours
+(4:00-20:00 ET) coverage on its free Basic tier with no comparable gate -- live-verified with a
+real SPY 2026-07-31 call (920 bars, 04:00-19:59 ET) before any code was written, learning from the
+Alpha Vantage mistake of trusting docs over an empirical test. Structured identically to
+`alpha_vantage_fetch`/`ibkr_fetch`: `validate.py`'s `main(argv)` is a thin, untested harness
+(`python -m massive_fetch.validate [TICKER] [YYYY-MM-DD]`, same `SPY`/`2026-07-31` defaults) around
+`shared.providers.massive.MassiveIntraDay` (tested), printing the same `_spot_check` summary shape
+and writing a CSV via `day_chart.output.bars_to_csv` (reused as-is). `MassiveIntraDay` was later
+also wired into `day-chart` itself as a fifth `--provider` choice (see that module's notes below) —
+`massive_fetch/validate.py` still exists separately as the simpler single-purpose fetch script.
+
+`shared/providers/massive.py` -- `MassiveIntraDay.fetch_bars(ticker, target_date) -> list[DayBar]`,
+wrapping `GET /v2/aggs/ticker/{ticker}/range/1/minute/{date}/{date}` (`adjusted=true`,
+`sort=asc`, `limit=50000`) -- unlike Alpha Vantage's single fixed endpoint with a `function` query
+param, Massive routes per-ticker/date through the URL path itself, so `request_fn: Callable[[str,
+dict], dict] | None` (injectable, same DI-over-monkeypatching pattern as the other providers) takes
+both the built URL and params rather than params alone. Raises `AppError` on `{"status": "ERROR",
+"error": ...}` responses (confirmed live with a bad API key) or when `results` is empty/absent
+(confirmed live against a weekend date and an invalid ticker — both return `{"status": "OK",
+"resultsCount": 0}` with no `results` key at all, not an error status). Timestamps (`t`, Unix
+milliseconds) convert directly to UTC with no timezone ambiguity, unlike Alpha Vantage's naive
+US/Eastern timestamp strings. `v` (volume) comes back as a float in practice (observed fractional
+values on real data) and is truncated via `int(...)`, same as every other provider's own volume
+cast.
+
+Retries on HTTP 429 (rate-limited) specifically, same `max_attempts`/`retry_delay_seconds`/
+`sleep_fn`-injectable shape as `shared/providers/databento.py`'s own retry loop, but keyed off
+`requests.exceptions.HTTPError.response.status_code == 429` rather than a client/server-error SDK
+exception split -- other `HTTPError`s (e.g. a 403 past the 2-year free-tier lookback limit) fall
+through to the ordinary `AppError`-wrapping path immediately, unretried, since they'll never
+succeed on retry. Added after `day_chart.cli --provider massive`'s range-mode soft-warning change
+(see that module's own notes) revealed the real gap: a day dropped from a range because it got
+rate-limited was previously indistinguishable from a day genuinely having no data (weekend,
+holiday) -- both just vanished via the same per-day skip path. Retrying means a rate-limited day
+gets a real second chance instead of being silently written off. Defaults: 3 attempts, 15s between
+retries -- a guess at safe-enough spacing (60s/5 calls = 12s minimum, padded slightly) since the
+exact rate-limit windowing (sliding vs. fixed-bucket) isn't known, not a measured value the way
+Databento's own retry delay was documented to be considered.
+
+**Known limit, confirmed live**: the free Basic tier's 2-year historical lookback is real and
+enforced server-side — a request for a date past that window returns a plain HTTP 403 (not the
+JSON `{"status": "ERROR", ...}` shape used elsewhere), which `fetch_bars` still catches and wraps
+in `AppError` via its generic exception handler, just with `requests`' own "403 Client Error:
+Forbidden" text rather than a friendlier message. Confirmed via `massive.com/pricing`'s full tier
+ladder (Basic $0/2yr, Starter $29/mo/5yr, Developer $79/mo/10yr, Advanced $199/mo/20+yr) — no code
+change made for this (no proactive range check, unlike `day_chart.cli`'s `MAX_IBKR_RANGE_DAYS`
+cap), since `massive_fetch` only ever fetches a single date per call and the resulting error is
+already clear enough without one.
+
 ### `stock_quote` — first experiment CLI
 
 Fetches and prints the current quote for a single stock ticker. Depends on `defs` for the
@@ -484,8 +598,8 @@ confined to `shared/providers/quant_data.py`.
   `settings_path: Path`, `output_dir: Path`, and `show_chart: ShowChartFn` (`Callable[[str,
   list[DayChartData], list[BarConflict]], None]`) parameters — same parameter-based DI pattern as `stock_quote.cli`
   (tests inject a non-GUI stand-in for `show_chart`, same reason `provider` is injected instead of
-  hitting a real database/Gateway). `--provider {ibkr,quant-data,yahoo,databento}` (default `ibkr`)
-  selects which data source backs the default construction path — a real behavior change from when
+  hitting a real database/Gateway). `--provider {ibkr,quant-data,yahoo,databento,massive}` (default
+  `ibkr`) selects which data source backs the default construction path — a real behavior change from when
   quant-data was the only option, deliberate: IBKR has strictly more data (real extended-hours
   volume) than the Yahoo-sourced quant-data path (see `shared/providers/ibkr.py`'s note above and
   [issue #12](https://github.com/croicu/quant-scratch/issues/12)). `yahoo`
@@ -494,20 +608,28 @@ confined to `shared/providers/quant_data.py`.
   quant-data warehouse — not a data-quality improvement (see `shared/providers/yahoo_finance.py`'s
   note above). `databento` (`DatabentoIntraDay`, see `shared/providers/databento.py`'s note above) is
   the fourth, an additional paid source rather than a default change — IBKR already covers the
-  extended-hours-volume need. The default provider can't be constructed before settings are loaded
+  extended-hours-volume need. `massive` (`MassiveIntraDay`, see `shared/providers/massive.py`'s note
+  above, built for [issue #23](https://github.com/croicu/quant-scratch/issues/23)'s validation work
+  before being wired in here too) is the fifth, another additional source rather than a default
+  change, on a genuinely free tier unlike `databento` — live-verified with zero zero-volume bars
+  across every session for a real SPY pull, better extended-hours coverage than IBKR itself showed
+  for a comparable recent date. The default provider can't be constructed before settings are loaded
   (`ibkr` needs `Settings.ibkr`, `quant-data` needs `Settings.postgres`, `databento` needs
-  `Settings.databento`, `yahoo` needs nothing), so construction happens *after* `Settings.load()`
+  `Settings.databento`, `massive` needs `Settings.massive`, `yahoo` needs nothing), so construction
+  happens *after* `Settings.load()`
   succeeds, via `_build_provider(provider_name, settings) -> IntraDayProvider` — a small pure
   function factored out specifically so a unit test can assert the right provider *class* gets
   constructed (with what settings-derived arguments) without ever touching a real connection:
   `IBKRIntraDay.__init__` doesn't connect either way (connect-per-`fetch_bars`-call, see its own
-  note above), `YahooFinanceIntraDay.__init__` takes no arguments at all, and `DatabentoIntraDay.
-  __init__` only stores its api key/dataset (the actual HTTP client is constructed lazily inside
-  `fetch_bars` via `client_factory`), so constructing any of the three in a test is already
+  note above), `YahooFinanceIntraDay.__init__` takes no arguments at all, and `DatabentoIntraDay`/
+  `MassiveIntraDay.__init__` only store their api key (plus dataset, for Databento) — the actual
+  HTTP client/request is constructed lazily inside `fetch_bars`, so constructing any of these in a
+  test is already
   offline-safe; `QuantDataIntraDay.__init__` does connect eagerly, so no test exercises its
   construction path for real, same as before this change. `_build_provider` raises `AppError` if
   the provider-specific required settings are missing (`quant-data` requires `Settings.postgres`;
-  `databento` requires `Settings.databento`; `ibkr`/`yahoo` have no required settings — `ibkr`'s
+  `databento` requires `Settings.databento`; `massive` requires `Settings.massive`; `ibkr`/`yahoo`
+  have no required settings — `ibkr`'s
   absent `Settings.ibkr` just means every field falls back to its own default, and `yahoo` reads no
   settings at all). `output_dir` has no CLI flag
   (`--output-dir` was deliberately deferred); it exists purely as a test seam, the same role
@@ -527,8 +649,22 @@ confined to `shared/providers/quant_data.py`.
   a margin under IBKR's documented 60-requests/10-minutes historical-data pacing ceiling that a
   per-day fetch loop could otherwise plausibly cross for a large range (a live probe of 7 rapid
   same-contract requests found no violation well below this cap, but 60+ at once is untested; see
-  [tasks/day_chart_ibkr_integration.md](../tasks/day_chart_ibkr_integration.md)). No such cap
-  applies to `quant-data` (no external pacing constraint on Postgres reads). For each resolved day,
+  [tasks/day_chart_ibkr_integration.md](../tasks/day_chart_ibkr_integration.md)). A *softer* shape
+  for `--provider massive`: past `MAX_MASSIVE_RANGE_DAYS` (5) days, `main()` logs a `Logger.warning`
+  (category `date_range`, same category the ordinary per-day skip warning below uses) rather than
+  raising `AppError` — originally a hard cap matching IBKR's, relaxed after live testing found
+  Massive's documented free-tier 5-calls/minute limit isn't strictly enforced in practice: a real
+  12-day range (well past the threshold) still returned genuine data for 6 of the 12 days rather
+  than failing outright, so blocking the request outright would have been overcautious. Days that
+  *do* get rate-limited during an oversized range still surface individually via the ordinary
+  per-day skip path below — no separate handling needed for that case. `MassiveIntraDay.fetch_bars`
+  takes a single date, same as every other provider's, so range mode still calls it once per day
+  with no throttling between calls either way — a design choice, not forced: Massive's own
+  aggregates endpoint could serve a whole date range in one call, but that would need day-chart's
+  range-mode loop to special-case this one provider instead of treating every `IntraDayProvider`
+  uniformly, so the simpler per-day shape was kept regardless of the cap-vs-warning question. No
+  cap or warning applies to `quant-data` (no external pacing constraint on
+  Postgres reads). For each resolved day,
   `main()` calls `provider.fetch_bars` individually; in range mode (2+ days), a per-day `AppError`
   (weekend, holiday, not-yet-ingested) is caught, logged via `Logger.warning` (category
   `date_range`), and that day is dropped from the chart rather than failing the whole command —
@@ -699,24 +835,27 @@ against a local IB Gateway/TWS instance, live-first with an automatic delayed-da
 `tests.mocks.yahoo_finance.MockYahooFinance`, a fixture lookup) → `StockQuote` →
 `output.quote_to_csv` → stdout.
 
-`day-chart TICKER [--date ... | --start-date ... --end-date ...] [--provider {ibkr,quant-data,yahoo,databento}]`
+`day-chart TICKER [--date ... | --start-date ... --end-date ...] [--provider {ibkr,quant-data,yahoo,databento,massive}]`
 → `cli._build_provider` (skipped if a `provider` was injected) selects `shared.providers.ibkr.IBKRIntraDay`
 (default), `shared.providers.quant_data.QuantDataIntraDay`,
-`shared.providers.yahoo_finance.YahooFinanceIntraDay`, or `shared.providers.databento.DatabentoIntraDay`
-from `Settings.ibkr`/`Settings.postgres`/nothing/`Settings.databento` respectively → `cli.resolve_session_date`
-(single day) or `cli.resolve_date_range` (either range flag given, plus a 30-day cap check when the
-provider is `ibkr`) → one `list[date]` → per-date injected `IntraDayProvider.fetch_bars` (real,
+`shared.providers.yahoo_finance.YahooFinanceIntraDay`, `shared.providers.databento.DatabentoIntraDay`,
+or `shared.providers.massive.MassiveIntraDay`
+from `Settings.ibkr`/`Settings.postgres`/nothing/`Settings.databento`/`Settings.massive` respectively → `cli.resolve_session_date`
+(single day) or `cli.resolve_date_range` (either range flag given, plus a 30-day hard cap check when the
+provider is `ibkr`, or a 5-day soft-warning threshold when it's `massive`) → one `list[date]` → per-date injected `IntraDayProvider.fetch_bars` (real,
 `ibkr`: `IBKRIntraDay`, a connect-per-call `ib_async` request against a local IB Gateway/TWS
 instance; real, `quant-data`: `QuantDataIntraDay`, wrapping a `quant_data.MarketData` read against
 the Postgres warehouse; real, `yahoo`: `YahooFinanceIntraDay`, a direct `yfinance` network call;
 real, `databento`: `DatabentoIntraDay`, a `databento.Historical.timeseries.get_range` HTTP request
-against Databento's consolidated equities feed; all four tag each bar via
+against Databento's consolidated equities feed; real, `massive`: `MassiveIntraDay`, a
+`GET /v2/aggs/ticker/...` HTTP request against Massive's (formerly Polygon.io) free-tier
+aggregates API; all five tag each bar via
 `shared.sessions.infer_session`; test: `tests.mocks.quant_data.MockQuantDataIntraDay`, a fixture
 lookup) — in range mode, a per-day `AppError` is logged as a warning and that day dropped rather
 than failing the whole command — → `list[DayChartData]` (`(date, list[DayBar])` per charted day).
 When `--provider quant-data`, also → `QuantDataIntraDay.fetch_conflicts` and
 `QuantDataIntraDay.fetch_rejected_bars` (each once for the whole resolved range; silent no-op →
-`[]` for `ibkr`/`yahoo`/`databento`) → `list[BarConflict]` and `list[ProviderBar]` respectively.
+`[]` for `ibkr`/`yahoo`/`databento`/`massive`) → `list[BarConflict]` and `list[ProviderBar]` respectively.
 All four (`days`, `conflicts`, `rejected_bars` alongside `ticker`) → injected `show_chart` (real:
 `chart.show_chart`, a blocking popup window rendering red/blue candlesticks for any conflicts and
 orange candlesticks for any rejected bars; test: a non-GUI stand-in) and, after flattening every

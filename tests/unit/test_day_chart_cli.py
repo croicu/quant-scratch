@@ -7,7 +7,7 @@ import pytest
 
 from day_chart import cli
 from defs.protocols import DayBar
-from shared.settings import DatabentoSettings, IBKRSettings, Settings
+from shared.settings import DatabentoSettings, IBKRSettings, MassiveSettings, Settings
 from tests.mocks.quant_data import MockQuantDataIntraDay
 
 SETTINGS_PATH = Path(__file__).parent.parent / "data" / "settings.json"
@@ -297,6 +297,29 @@ def test_build_provider_databento_forwards_settings_fields(monkeypatch):
     assert captured_kwargs == {"api_key": "db-test-key", "dataset": "XNAS.ITCH"}
 
 
+def test_build_provider_massive_raises_when_massive_settings_missing():
+    settings = Settings(debug=False)  # massive defaults to None
+
+    with pytest.raises(cli.AppError):
+        cli._build_provider(cli.PROVIDER_MASSIVE, settings)
+
+
+def test_build_provider_massive_forwards_settings_fields(monkeypatch):
+    captured_kwargs = {}
+
+    class FakeMassiveIntraDay:
+        def __init__(self, **kwargs):
+            captured_kwargs.update(kwargs)
+
+    monkeypatch.setattr(cli, "MassiveIntraDay", FakeMassiveIntraDay)
+    settings = Settings(debug=False, massive=MassiveSettings(api_key="massive-test-key"))
+
+    provider = cli._build_provider(cli.PROVIDER_MASSIVE, settings)
+
+    assert isinstance(provider, FakeMassiveIntraDay)
+    assert captured_kwargs == {"api_key": "massive-test-key"}
+
+
 def test_main_range_mode_rejects_oversized_range_for_ibkr_provider(tmp_path, capsys):
     # No provider injected -- IBKRIntraDay() constructs offline (connect-per-call, not at
     # __init__), so this exercises the real default-provider path up to the cap check.
@@ -309,6 +332,27 @@ def test_main_range_mode_rejects_oversized_range_for_ibkr_provider(tmp_path, cap
     captured = capsys.readouterr()
     assert exit_code == 1
     assert "cap" in captured.err
+
+
+def test_main_range_mode_warns_but_proceeds_for_oversized_massive_range(monkeypatch, tmp_path):
+    # Reuses MockQuantDataIntraDay as a stand-in fetch source (same pattern as the quant-data cap
+    # test below) -- only its fixture-backed days (01-02, 01-05) actually chart, the rest are
+    # dropped by the ordinary per-day-skip path, same as any other provider with partial data.
+    warnings = []
+    monkeypatch.setattr(cli.Logger, "warning", lambda message, category=None: warnings.append((message, category)))
+
+    exit_code = cli.main(
+        ["SPY", "--start-date", "2026-01-01", "--end-date", "2026-01-10", "--provider", "massive"],  # > 5 days
+        provider=MockQuantDataIntraDay(),
+        settings_path=SETTINGS_PATH,
+        output_dir=tmp_path,
+        show_chart=lambda ticker, days, conflicts=None, rejected_bars=None: None,
+    )
+
+    assert exit_code == 0
+    soft_limit_warnings = [message for message, category in warnings if "soft limit" in message]
+    assert len(soft_limit_warnings) == 1
+    assert "5-day soft limit" in soft_limit_warnings[0]
 
 
 def test_main_range_mode_ibkr_cap_does_not_apply_to_quant_data_provider(tmp_path):
