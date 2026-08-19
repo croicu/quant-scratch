@@ -9,7 +9,7 @@ from pathlib import Path
 from time import perf_counter
 
 from defs.contracts import IntraDayProvider
-from defs.protocols import BarConflict, ProviderBar
+from defs.protocols import BarConflict, ProviderBar, QuoteBar
 from shared.diagnostics import ConsoleLogSink, Logger
 from shared.errors import AppError
 from shared.providers import databento, massive, yahoo_finance
@@ -47,6 +47,16 @@ PROVIDER_MASSIVE = massive.PROVIDER_NAME
 # warning, same as any other per-day fetch failure -- no special handling needed for that case.
 MAX_MASSIVE_RANGE_DAYS = 5
 
+# Massive's free Basic tier has no same-day data at all (confirmed live: a request for "today"
+# 403s with "Your plan doesn't include this data timeframe", while yesterday and earlier 200 --
+# not just delayed, genuinely unavailable until some point after that session's close). Since the
+# CLI's ordinary default is "today, or the last trading day if today's a weekend," that default
+# would reliably 403/no-data for --provider massive specifically -- shifting the no-flags-given
+# default back one calendar day (then still rolling further back over a weekend) sidesteps needing
+# to know Massive's exact same-day cutoff time. An explicit --date/--start-date/--end-date is
+# unaffected either way -- this only changes what "no date given" resolves to.
+MASSIVE_DEFAULT_LOOKBACK_DAYS = 1
+
 # IBKR's historical-data API enforces its own pacing limits (documented ceiling: 60 requests per
 # 10 minutes). Range mode calls fetch_bars once per day, so an unbounded range could plausibly
 # cross that ceiling -- a live probe of 7 rapid same-contract requests (~2.6s total) found no
@@ -55,7 +65,7 @@ MAX_MASSIVE_RANGE_DAYS = 5
 # reads), so this only applies to the ibkr provider.
 MAX_IBKR_RANGE_DAYS = 30
 
-ShowChartFn = Callable[[str, list[DayChartData], list[BarConflict], list[ProviderBar]], None]
+ShowChartFn = Callable[[str, list[DayChartData], list[BarConflict], list[ProviderBar], list[QuoteBar]], None]
 
 
 @dataclass
@@ -140,11 +150,11 @@ def _parse_and_validate_date(date_argument: str, current_date: date) -> date:
     return parsed_date
 
 
-def resolve_session_date(date_argument: str | None, today: date | None = None) -> date:
+def resolve_session_date(date_argument: str | None, today: date | None = None, default_lookback_days: int = 0) -> date:
     current_date = date.today() if today is None else today
 
     if date_argument is None:
-        return _last_trading_day(current_date)
+        return _last_trading_day(current_date - timedelta(days=default_lookback_days))
 
     parsed_date = _parse_and_validate_date(date_argument, current_date)
     if parsed_date.weekday() >= 5:
@@ -157,11 +167,12 @@ def resolve_date_range(
     start_date_argument: str | None,
     end_date_argument: str | None,
     today: date | None = None,
+    default_lookback_days: int = 0,
 ) -> list[date]:
     current_date = date.today() if today is None else today
 
     if end_date_argument is None:
-        parsed_end = _last_trading_day(current_date)
+        parsed_end = _last_trading_day(current_date - timedelta(days=default_lookback_days))
     else:
         parsed_end = _parse_and_validate_date(end_date_argument, current_date)
 
@@ -270,8 +281,10 @@ def main(
 
         fetch_phase_start = perf_counter()
 
+        default_lookback_days = MASSIVE_DEFAULT_LOOKBACK_DAYS if arguments.provider == PROVIDER_MASSIVE else 0
+
         if is_range_mode:
-            session_dates = resolve_date_range(arguments.start_date, arguments.end_date)
+            session_dates = resolve_date_range(arguments.start_date, arguments.end_date, default_lookback_days=default_lookback_days)
 
             if arguments.provider == PROVIDER_IBKR and len(session_dates) > MAX_IBKR_RANGE_DAYS:
                 raise AppError(
@@ -308,7 +321,7 @@ def main(
 
             csv_path = active_output_dir / f"{normalized_ticker}_{session_dates[0].isoformat()}_{session_dates[-1].isoformat()}_data.csv"
         else:
-            session_date = resolve_session_date(arguments.date)
+            session_date = resolve_session_date(arguments.date, default_lookback_days=default_lookback_days)
             bars = active_provider.fetch_bars(normalized_ticker, session_date)
             days = [(session_date, bars)]
 
@@ -331,14 +344,34 @@ def main(
                 conflicts = active_provider.fetch_conflicts(normalized_ticker, session_date, session_date)
                 rejected_bars = active_provider.fetch_rejected_bars(normalized_ticker, session_date, session_date)
 
+        # WAP/trade-count (+ bid-ask for ibkr) enrichment is an ibkr/massive-only extra, same
+        # "always on for this provider, no separate flag" precedent as quant-data's
+        # conflicts/rejected_bars above. A per-day fetch failure here only drops that day's
+        # enrichment (blank CSV columns) -- it doesn't invalidate the day's OHLCV data the way a
+        # fetch_bars failure does.
+        quote_bars: list[QuoteBar] = []
+        if arguments.provider in (PROVIDER_IBKR, PROVIDER_MASSIVE):
+            for session_date_with_bars, _ in days:
+                try:
+                    quote_bars.extend(active_provider.fetch_quote_bars(normalized_ticker, session_date_with_bars))
+                except AppError as error:
+                    Logger.warning(
+                        f"day-chart: no WAP/trade-count/bid-ask data for {session_date_with_bars.isoformat()}: {error}",
+                        category=CATEGORY_DATE_RANGE,
+                    )
+
         all_bars = []
         for _, day_bars in days:
             all_bars.extend(day_bars)
 
-        active_show_chart(normalized_ticker, days, conflicts, rejected_bars)
+        # The bid/ask chart panel stays ibkr-only by design (massive never has avg_bid/avg_ask, so
+        # a third panel there would just be an empty, pointless row) -- quote_bars still reaches
+        # the CSV for both providers below, only the chart call is gated further.
+        chart_quote_bars = quote_bars if (quote_bars and arguments.provider == PROVIDER_IBKR) else None
+        active_show_chart(normalized_ticker, days, conflicts, rejected_bars, chart_quote_bars)
 
         write_start = perf_counter()
-        csv_path.write_text(bars_to_csv(all_bars), encoding="utf-8", newline="")
+        csv_path.write_text(bars_to_csv(all_bars, quote_bars if quote_bars else None), encoding="utf-8", newline="")
         Logger.perf(f"wrote {len(all_bars)} rows to {csv_path}", perf_counter() - write_start)
 
         print(f"day-chart: wrote {csv_path}")

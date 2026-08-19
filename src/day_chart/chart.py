@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.figure import Figure  # noqa: E402
 from matplotlib.patches import Rectangle  # noqa: E402
 
-from defs.protocols import BarConflict, DayBar, ProviderBar  # noqa: E402
+from defs.protocols import BarConflict, DayBar, ProviderBar, QuoteBar  # noqa: E402
 from shared.diagnostics import CATEGORY_PERF_UI, Logger  # noqa: E402
 from shared.errors import AppError  # noqa: E402
 from shared.sessions import AFTER_MARKET, EASTERN, PRE_MARKET, REGULAR  # noqa: E402
@@ -107,12 +107,13 @@ def show_chart(
     days: list[DayChartData],
     conflicts: list[BarConflict] | None = None,
     rejected_bars: list[ProviderBar] | None = None,
+    quote_bars: list[QuoteBar] | None = None,
 ) -> None:
     switch_start = perf_counter()
     plt.switch_backend(_INTERACTIVE_BACKEND)
     Logger.perf(f"switched to {_INTERACTIVE_BACKEND} backend", perf_counter() - switch_start)
 
-    figure = render_chart(ticker, days, conflicts, rejected_bars)
+    figure = render_chart(ticker, days, conflicts, rejected_bars, quote_bars)
     # None for any backend without a real GUI window (e.g. Agg, used in tests) -- window
     # positioning is a TkAgg-specific nicety, not something every backend needs to support.
     window = getattr(figure.canvas.manager, "window", None)
@@ -231,22 +232,30 @@ def render_chart(
     days: list[DayChartData],
     conflicts: list[BarConflict] | None = None,
     rejected_bars: list[ProviderBar] | None = None,
+    quote_bars: list[QuoteBar] | None = None,
 ) -> Figure:
     if not days:
         raise AppError(f"Cannot render chart for '{ticker}': no days provided.")
 
     active_conflicts = [] if conflicts is None else conflicts
     active_rejected_bars = [] if rejected_bars is None else rejected_bars
+    # A third row (bid/ask) only appears when quote_bars is actually supplied -- None means "this
+    # provider has no such data" (every non-IBKR path), so the grid stays 2 rows exactly as before.
+    show_bid_ask_row = quote_bars is not None
+    active_quote_bars = [] if quote_bars is None else quote_bars
     render_start = perf_counter()
 
+    row_count = 3 if show_bid_ask_row else 2
+    height_ratios = [3, 1, 1] if show_bid_ask_row else [3, 1]
+
     figure, axes = plt.subplots(
-        2,
+        row_count,
         len(days),
         sharex="col",
         squeeze=False,
         figsize=(max(12, 5 * len(days)), 8),
         dpi=_FIGURE_DPI,
-        gridspec_kw={"height_ratios": [3, 1]},
+        gridspec_kw={"height_ratios": height_ratios},
         layout="constrained",
     )
     figure.get_layout_engine().set(w_pad=_DAY_PADDING_PX / _FIGURE_DPI, wspace=0)
@@ -255,6 +264,7 @@ def render_chart(
     for column_index, (session_date, bars) in enumerate(days):
         price_axis = axes[0, column_index]
         volume_axis = axes[1, column_index]
+        bid_ask_axis = axes[2, column_index] if show_bid_ask_row else None
 
         timestamps_et: list[datetime] = []
         volumes: list[int] = []
@@ -293,9 +303,38 @@ def render_chart(
         volume_axis.set_xlim(session_start, session_end)
         volume_axis.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M", tz=EASTERN))
 
+        if bid_ask_axis is not None:
+            _draw_bid_ask(bid_ask_axis, active_quote_bars, session_date)
+            bid_ask_axis.set_xlabel("Time (ET)")
+            if column_index == 0:
+                bid_ask_axis.set_ylabel("Bid/Ask")
+
     figure.autofmt_xdate()
     Logger.perf(f"rendered {len(days)} day(s)", perf_counter() - render_start)
     return figure
+
+
+def _draw_bid_ask(axis, quote_bars: list[QuoteBar], session_date: date) -> None:
+    # Only plots minutes where the BID_ASK call actually returned a bar (avg_bid/avg_ask
+    # non-None) -- unlike the CSV's left join against DayBar timestamps, the chart doesn't need a
+    # point for every OHLCV minute, just the ones with real bid/ask data.
+    timestamps_et: list[datetime] = []
+    avg_bids: list[float] = []
+    avg_asks: list[float] = []
+    for quote_bar in quote_bars:
+        if quote_bar.avg_bid is None or quote_bar.avg_ask is None:
+            continue
+        timestamp_et = quote_bar.timestamp.astimezone(EASTERN)
+        if timestamp_et.date() != session_date:
+            continue
+        timestamps_et.append(timestamp_et)
+        avg_bids.append(quote_bar.avg_bid)
+        avg_asks.append(quote_bar.avg_ask)
+
+    axis.plot(timestamps_et, avg_bids, color=_CANDIDATE_COLOR, linewidth=1, label="avg bid")
+    axis.plot(timestamps_et, avg_asks, color=_WHISTLEBLOWER_COLOR, linewidth=1, label="avg ask")
+    if timestamps_et:
+        axis.legend(loc="upper left", fontsize="x-small")
 
 
 def _draw_conflict(axis, conflict: BarConflict, timestamp_et: datetime) -> None:

@@ -6,10 +6,10 @@ from collections.abc import Callable
 from datetime import date, datetime, timezone
 from datetime import time as time_of_day
 
-from ib_async import IB, Stock
+from ib_async import IB, BarData, Stock
 from ib_async.ib import StartupFetch
 
-from defs.protocols import DayBar, StockQuote
+from defs.protocols import DayBar, QuoteBar, StockQuote
 
 from ..diagnostics import Logger
 from ..errors import AppError
@@ -45,7 +45,10 @@ class IBKRIntraDay:
         # disconnected. Overridable for tests to inject a fake client.
         self._client_factory = IB if client_factory is None else client_factory
 
-    def fetch_bars(self, ticker: str, target_date: date) -> list[DayBar]:
+    def _fetch_raw_bars(self, ticker: str, target_date: date, method: str) -> list[BarData]:
+        # Shared connect/qualify/reqHistoricalData/disconnect sequence, parameterized by IBKR's
+        # own whatToShow value ("TRADES", "BID_ASK", ...) -- the single point where fetch_bars and
+        # fetch_quote_bars distinguish which feed they're pulling.
         normalized_ticker = ticker.upper()
         contract = Stock(normalized_ticker, "SMART", "USD")
         # "1 D" ending at the after-market close covers the full 4:00-20:00 ET session this
@@ -71,14 +74,20 @@ class IBKRIntraDay:
                 endDateTime=end_date_time,
                 durationStr="1 D",
                 barSizeSetting="1 min",
-                whatToShow="TRADES",
+                whatToShow=method,
                 useRTH=False,
                 formatDate=2,  # timezone-aware UTC datetimes on each bar, not TWS-local
             )
         except Exception as error:
-            raise AppError(f"Failed to fetch bars for '{normalized_ticker}' on {target_date.isoformat()} from IBKR: {error}") from error
+            raise AppError(f"Failed to fetch {method} bars for '{normalized_ticker}' on {target_date.isoformat()} from IBKR: {error}") from error
         finally:
             ib.disconnect()
+
+        return raw_bars
+
+    def fetch_bars(self, ticker: str, target_date: date) -> list[DayBar]:
+        normalized_ticker = ticker.upper()
+        raw_bars = self._fetch_raw_bars(ticker, target_date, method="TRADES")
 
         if not raw_bars:
             raise AppError(f"No data available for '{normalized_ticker}' on {target_date.isoformat()}.")
@@ -104,6 +113,46 @@ class IBKRIntraDay:
             category=CATEGORY_INTRADAY_FETCH,
         )
         return bars
+
+    def fetch_quote_bars(self, ticker: str, target_date: date) -> list[QuoteBar]:
+        # Two independent IBKR calls, distinguished by the `method` argument on _fetch_raw_bars:
+        # TRADES for wap/trade_count (already returned by IBKR on every TRADES bar, just unused by
+        # fetch_bars), BID_ASK for avg_bid/avg_ask (IBKR's own semantics for a BID_ASK bar: open is
+        # the time-averaged bid, close is the time-averaged ask). Deliberately a second TRADES call
+        # rather than sharing fetch_bars's -- keeps DayBar/QuoteBar fully decoupled at the cost
+        # of one redundant call (see quant-scratch#26 for the trade-off discussion).
+        normalized_ticker = ticker.upper()
+        trades_bars = self._fetch_raw_bars(ticker, target_date, method="TRADES")
+        bid_ask_bars = self._fetch_raw_bars(ticker, target_date, method="BID_ASK")
+
+        bid_ask_by_timestamp: dict[datetime, BarData] = {}
+        for raw_bar in bid_ask_bars:
+            if isinstance(raw_bar.date, datetime):
+                bid_ask_by_timestamp[raw_bar.date] = raw_bar
+
+        # Left join on the TRADES timestamps -- every TRADES minute gets an QuoteBar, with
+        # avg_bid/avg_ask left None for any minute BID_ASK didn't return a bar for.
+        quote_bars: list[QuoteBar] = []
+        for raw_bar in trades_bars:
+            if not isinstance(raw_bar.date, datetime):
+                raise AppError(f"Unexpected non-intraday bar date '{raw_bar.date}' for '{normalized_ticker}' on {target_date.isoformat()}.")
+            timestamp_utc = raw_bar.date
+            matching_bid_ask = bid_ask_by_timestamp.get(timestamp_utc)
+            quote_bars.append(
+                QuoteBar(
+                    timestamp=timestamp_utc,
+                    wap=None if math.isnan(raw_bar.average) or raw_bar.average < 0 else float(raw_bar.average),
+                    trade_count=None if raw_bar.barCount < 0 else int(raw_bar.barCount),
+                    avg_bid=None if matching_bid_ask is None else matching_bid_ask.open,
+                    avg_ask=None if matching_bid_ask is None else matching_bid_ask.close,
+                )
+            )
+
+        Logger.info(
+            f"ibkr: fetched {len(quote_bars)} quote bars for {normalized_ticker} on {target_date.isoformat()} from IBKR.",
+            category=CATEGORY_INTRADAY_FETCH,
+        )
+        return quote_bars
 
 
 class IBKRQuote:

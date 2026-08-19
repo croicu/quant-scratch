@@ -76,6 +76,13 @@ CLI signature and file format schemas for `quant-scratch`.
   validated explicitly, and the provider may simply not have data for the requested ticker/date yet
   — both surface as the same generic "no data available" error. **Ignored if either `--start-date`
   or `--end-date` is given.**
+  - **`--provider massive` only**: this default is shifted back one additional calendar day (then
+    still rolled further back over a weekend the same way) — Massive's free tier has no same-day
+    data at all (confirmed live: a same-day request 403s with "Your plan doesn't include this data
+    timeframe," while yesterday and earlier succeed), so the ordinary "today" default would
+    reliably fail for this provider specifically. An explicit `--date` (including today's own
+    date, if you really want to hit that 403) is unaffected — only the no-flags-given default
+    changes. Every other provider keeps the plain today-or-last-trading-day default.
 - `--start-date YYYY-MM-DD` / `--end-date YYYY-MM-DD`: fetch every day in this inclusive range
   instead of a single day — the popup shows one price/volume chart per day, stacked horizontally
   (same 3:1 price:volume split per day, small padding between days). Giving either flag switches
@@ -83,7 +90,8 @@ CLI signature and file format schemas for `quant-scratch`.
   behavior unchanged.
   - Both given: fetches `start`..`end` inclusive. Rejected (exit `1`) if `start` is after `end`.
   - `--start-date` alone: end defaults to today's single-day default (today, or the last trading
-    day if today is a weekend).
+    day if today is a weekend; one day further back for `--provider massive`, same as `--date`
+    above).
   - `--end-date` alone: start defaults to the same day as `--end-date` (i.e. behaves like `--date`
     with that value).
   - Each bound is only checked for a valid, non-future date — unlike `--date`, a bound landing on a
@@ -126,6 +134,28 @@ CLI signature and file format schemas for `quant-scratch`.
   data**: the quality check that sets this designation is still undesigned upstream in quant-data,
   so this always renders nothing today — see
   [issue #16](https://github.com/croicu/quant-scratch/issues/16).
+- **`--provider ibkr` only**: always (no separate flag) also fetches WAP, trade count, and
+  time-averaged bid/ask per minute (`shared.providers.ibkr.IBKRIntraDay.fetch_quote_bars`, IBKR's
+  `TRADES` bar `.average`/`.barCount` plus a separate `BID_ASK` call's `.open`/`.close`), written
+  into the CSV export (see below) and drawn as a third bid/ask panel per day on the popup (see the
+  popup section below). A per-day fetch failure here only drops that day's enrichment (blank CSV
+  columns, no third panel for that day) rather than failing the whole command — unlike a
+  `fetch_bars` failure, which drops the day's OHLCV entirely. Issues two additional IBKR calls per
+  day beyond the existing `TRADES` call already made for OHLCV (see
+  [issue #26](https://github.com/croicu/quant-scratch/issues/26) for the trade-off discussion) —
+  not counted against `--provider ibkr`'s 30-day range cap above, which remains untested at this
+  increased call volume.
+- **`--provider massive` only**: always (no separate flag) also fetches WAP and trade count per
+  minute (`shared.providers.massive.MassiveIntraDay.fetch_quote_bars`, Massive aggregates' `vw`/`n`
+  fields), written into the CSV export only — **no third chart panel for this provider** (a
+  deliberate choice: WAP/trade count aren't interesting to visualize, and Massive's free tier has
+  no bid/ask at all — see below — so a panel would just be empty). Unlike `ibkr`, this issues *zero*
+  additional HTTP calls — `vw`/`n` come back on the exact same aggregates call `fetch_bars` already
+  makes for OHLCV, so `fetch_quote_bars` just reads them out of that call's own cached response
+  instead of re-requesting them, which matters given the free tier's hard 5-calls/minute ceiling.
+  `avg_bid`/`avg_ask` are always blank for `massive` — its free Basic tier has no bid/ask/NBBO
+  product at any price point without a paid-tier upgrade (confirmed live: `/v3/quotes` 403s "not
+  entitled"). Silent no-op (empty CSV columns, no chart change) for `quant-data`/`yahoo`/`databento`.
 
 ### `open-quant-data`
 
@@ -345,7 +375,7 @@ disambiguates which day a row belongs to; no separate `date` column is added):
 
 | Column | Type | Description |
 |---|---|---|
-| `timestamp` | string | ISO 8601 UTC |
+| `timestamp` | string | `YYYY-MM-DD HH:MM:SS` in US/Eastern (matches the popup chart's x-axis) — plain local time, no `T` separator or UTC offset, so Excel parses it as a real datetime on open rather than importing it as text. `DayBar.timestamp` itself is still UTC internally; this is only the CSV's on-disk representation. |
 | `open` | float | |
 | `high` | float | |
 | `low` | float | |
@@ -353,6 +383,10 @@ disambiguates which day a row belongs to; no separate `date` column is added):
 | `volume` | int | |
 | `session` | string | `"pre-market"`, `"regular"`, or `"after-market"` |
 | `incomplete` | bool | `True` if quant-data's provider couldn't supply full data for this bar (e.g. no pre/after-market volume), or if a per-provider quality check flagged the value implausible (`DataQuality.REJECTED`, collapsed into the same `True` here — see the rejected-whistleblower-bar note above for where that distinction is actually surfaced). Always `False` for `--provider ibkr`/`databento` — neither `IBKRIntraDay` nor `DatabentoIntraDay` has an equivalent flag, and a zero-volume bar from either is presumed genuinely no trades that minute, not missing data. |
+| `wap` | float or blank | **`--provider ibkr`/`massive` only.** Volume-weighted average trade price for the bar (IBKR `TRADES` bar's `.average`, or Massive aggregates' `vw`). Blank for `quant-data`/`yahoo`/`databento`, and for any minute the source didn't return a value for. |
+| `trade_count` | int or blank | **`--provider ibkr`/`massive` only.** Number of trades in the bar (IBKR `TRADES` bar's `.barCount`, or Massive aggregates' `n`). Blank under the same conditions as `wap`. |
+| `avg_bid` | float or blank | **`--provider ibkr` only.** Time-averaged bid price for the bar (IBKR `BID_ASK` bar's `.open`). Left blank via left join on `timestamp` when the separate `BID_ASK` call didn't return a bar for this exact minute (confirmed to happen live — `BID_ASK` and `TRADES` can return different bar counts for the same window). Always blank for `massive` — its free Basic tier has no bid/ask/NBBO product at all (confirmed live: `/v3/quotes` 403s "not entitled"), not just a per-minute gap. |
+| `avg_ask` | float or blank | **`--provider ibkr` only.** Time-averaged ask price for the bar (IBKR `BID_ASK` bar's `.close`). Same blank conditions as `avg_bid`, including always-blank for `massive`. |
 
 ### Day-chart popup window
 
@@ -360,13 +394,15 @@ No longer written to disk — `day-chart` displays it as an interactive matplotl
 (`day_chart.chart.show_chart`, `TkAgg` backend, non-blocking `plt.show()` gated by polling the GUI
 event loop until the window's own close event fires). One day: a figure with two vertically stacked subplots sharing an
 x-axis (rendered in US/Eastern time): price (line) on top (3/4 of the figure height), volume (bar)
-below (1/4). A `--start-date`/`--end-date` range: the same two-subplot layout repeated once per
+below (1/4). **For `--provider ibkr`**, a third subplot appears below volume (same height ratio as
+volume) plotting `avg_bid`/`avg_ask` as two lines — present only when quote-bar data was actually
+fetched for that day; every other provider keeps the two-subplot layout. A `--start-date`/`--end-date` range: the same subplot layout repeated once per
 charted day, stacked horizontally left-to-right in chronological order with a small gap between
 days (each day keeping its own independent midnight-to-midnight x-axis — days are *not* a shared
 timeline), a shared ticker title above the whole figure, and each day's own date as that panel's
-title. Only the leftmost day's panels are y-axis labeled ("Price"/"Volume"), to avoid repeating
+title. Only the leftmost day's panels are y-axis labeled ("Price"/"Volume"/"Bid/Ask"), to avoid repeating
 labels across every panel. Each subplot shades its background by session (pre-market / regular /
-after-market) using `axvspan`. Doesn't currently render `incomplete` visually — that information is
+after-market) using `axvspan` (the bid/ask panel does not). Doesn't currently render `incomplete` visually — that information is
 only in the CSV/`DayBar` data for now. For `--provider quant-data`, each price panel also draws a
 candlestick per disputed bar that falls on that panel's day (see the CLI section above): one red
 candlestick using the whistleblower provider's own OHLC values, plus one blue candlestick per

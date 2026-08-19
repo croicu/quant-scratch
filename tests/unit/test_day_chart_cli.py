@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from day_chart import cli
-from defs.protocols import DayBar
+from defs.protocols import DayBar, QuoteBar
 from shared.settings import DatabentoSettings, IBKRSettings, MassiveSettings, Settings
 from tests.mocks.quant_data import MockQuantDataIntraDay
 
@@ -17,6 +17,7 @@ class _FakeProviderTrackingQuantDataFetches:
     def __init__(self):
         self.fetch_conflicts_calls: list[tuple[str, date, date]] = []
         self.fetch_rejected_bars_calls: list[tuple[str, date, date]] = []
+        self.fetch_quote_bars_calls: list[tuple[str, date]] = []
 
     def fetch_bars(self, ticker: str, target_date: date) -> list[DayBar]:
         return [
@@ -37,6 +38,10 @@ class _FakeProviderTrackingQuantDataFetches:
 
     def fetch_rejected_bars(self, ticker: str, start_date: date, end_date: date) -> list:
         self.fetch_rejected_bars_calls.append((ticker, start_date, end_date))
+        return []
+
+    def fetch_quote_bars(self, ticker: str, target_date: date) -> list[QuoteBar]:
+        self.fetch_quote_bars_calls.append((ticker, target_date))
         return []
 
 
@@ -79,6 +84,28 @@ def test_resolve_session_date_rejects_weekend_date():
         cli.resolve_session_date("2026-01-03", today=date(2026, 1, 5))  # Saturday
 
 
+def test_resolve_session_date_default_lookback_shifts_back_by_n_days():
+    # 2026-01-06 is a Tuesday; shifting back 1 day lands on Monday 2026-01-05, a normal weekday --
+    # no further rollback needed.
+    resolved = cli.resolve_session_date(None, today=date(2026, 1, 6), default_lookback_days=1)
+
+    assert resolved == date(2026, 1, 5)
+
+
+def test_resolve_session_date_default_lookback_still_rolls_back_over_a_weekend():
+    # 2026-01-05 is a Monday; shifting back 1 day lands on Sunday 2026-01-04, which itself rolls
+    # back to Friday 2026-01-02 -- the same "last trading day" logic still applies after the shift.
+    resolved = cli.resolve_session_date(None, today=date(2026, 1, 5), default_lookback_days=1)
+
+    assert resolved == date(2026, 1, 2)
+
+
+def test_resolve_session_date_default_lookback_ignored_when_date_given_explicitly():
+    resolved = cli.resolve_session_date("2026-01-05", today=date(2026, 1, 6), default_lookback_days=1)
+
+    assert resolved == date(2026, 1, 5)
+
+
 def test_resolve_date_range_with_both_bounds_is_inclusive():
     resolved = cli.resolve_date_range("2026-01-02", "2026-01-05", today=date(2026, 1, 10))
 
@@ -112,6 +139,19 @@ def test_resolve_date_range_rejects_future_bound():
         cli.resolve_date_range("2026-01-02", "2026-01-20", today=date(2026, 1, 10))
 
 
+def test_resolve_date_range_default_lookback_shifts_end_back_by_n_days():
+    resolved = cli.resolve_date_range("2026-01-02", None, today=date(2026, 1, 6), default_lookback_days=1)
+
+    # end defaults to 2026-01-05 (Tuesday minus 1 day), not today's last trading day.
+    assert resolved == [date(2026, 1, 2), date(2026, 1, 3), date(2026, 1, 4), date(2026, 1, 5)]
+
+
+def test_resolve_date_range_default_lookback_ignored_when_end_date_given_explicitly():
+    resolved = cli.resolve_date_range(None, "2026-01-05", today=date(2026, 1, 6), default_lookback_days=1)
+
+    assert resolved == [date(2026, 1, 5)]
+
+
 def test_resolve_date_range_allows_weekend_bounds():
     # Individual range bounds may land on a weekend -- the caller skips no-data days rather than
     # rejecting the bound outright, unlike resolve_session_date's single-day strictness.
@@ -128,7 +168,7 @@ def test_main_shows_chart_and_writes_csv_and_returns_zero(tmp_path, capsys):
         provider=MockQuantDataIntraDay(),
         settings_path=SETTINGS_PATH,
         output_dir=tmp_path,
-        show_chart=lambda ticker, days, conflicts=None, rejected_bars=None: shown_calls.append((ticker, days)),
+        show_chart=lambda ticker, days, conflicts=None, rejected_bars=None, quote_bars=None: shown_calls.append((ticker, days)),
     )
 
     captured = capsys.readouterr()
@@ -185,7 +225,7 @@ def test_main_range_mode_skips_weekend_and_writes_combined_csv(tmp_path):
         provider=MockQuantDataIntraDay(),
         settings_path=SETTINGS_PATH,
         output_dir=tmp_path,
-        show_chart=lambda ticker, days, conflicts=None, rejected_bars=None: shown_calls.append((ticker, days)),
+        show_chart=lambda ticker, days, conflicts=None, rejected_bars=None, quote_bars=None: shown_calls.append((ticker, days)),
     )
 
     csv_path = tmp_path / "SPY_2026-01-02_2026-01-05_data.csv"
@@ -207,7 +247,7 @@ def test_main_range_mode_ignores_date_argument(tmp_path):
         provider=MockQuantDataIntraDay(),
         settings_path=SETTINGS_PATH,
         output_dir=tmp_path,
-        show_chart=lambda ticker, days, conflicts=None, rejected_bars=None: shown_calls.append((ticker, days)),
+        show_chart=lambda ticker, days, conflicts=None, rejected_bars=None, quote_bars=None: shown_calls.append((ticker, days)),
     )
 
     assert exit_code == 0
@@ -346,13 +386,56 @@ def test_main_range_mode_warns_but_proceeds_for_oversized_massive_range(monkeypa
         provider=MockQuantDataIntraDay(),
         settings_path=SETTINGS_PATH,
         output_dir=tmp_path,
-        show_chart=lambda ticker, days, conflicts=None, rejected_bars=None: None,
+        show_chart=lambda ticker, days, conflicts=None, rejected_bars=None, quote_bars=None: None,
     )
 
     assert exit_code == 0
     soft_limit_warnings = [message for message, category in warnings if "soft limit" in message]
     assert len(soft_limit_warnings) == 1
     assert "5-day soft limit" in soft_limit_warnings[0]
+
+
+def test_main_passes_massive_default_lookback_to_resolve_session_date(monkeypatch, tmp_path):
+    # Massive's free tier has no same-day data (confirmed live -- see issue #26's discussion) --
+    # when no --date is given, --provider massive should shift the default back a day rather than
+    # resolving to today/last-trading-day the way every other provider does.
+    real_resolve_session_date = cli.resolve_session_date
+    captured_kwargs = []
+
+    def spy_resolve_session_date(date_argument, today=None, default_lookback_days=0):
+        captured_kwargs.append(default_lookback_days)
+        return real_resolve_session_date(date_argument, today, default_lookback_days)
+
+    monkeypatch.setattr(cli, "resolve_session_date", spy_resolve_session_date)
+
+    cli.main(
+        ["SPY", "--provider", "massive"],
+        provider=MockQuantDataIntraDay(),
+        settings_path=SETTINGS_PATH,
+        output_dir=tmp_path,
+    )
+
+    assert captured_kwargs == [cli.MASSIVE_DEFAULT_LOOKBACK_DAYS]
+
+
+def test_main_passes_zero_lookback_to_resolve_session_date_for_ibkr(monkeypatch, tmp_path):
+    real_resolve_session_date = cli.resolve_session_date
+    captured_kwargs = []
+
+    def spy_resolve_session_date(date_argument, today=None, default_lookback_days=0):
+        captured_kwargs.append(default_lookback_days)
+        return real_resolve_session_date(date_argument, today, default_lookback_days)
+
+    monkeypatch.setattr(cli, "resolve_session_date", spy_resolve_session_date)
+
+    cli.main(
+        ["SPY", "--provider", "ibkr"],
+        provider=MockQuantDataIntraDay(),
+        settings_path=SETTINGS_PATH,
+        output_dir=tmp_path,
+    )
+
+    assert captured_kwargs == [0]
 
 
 def test_main_range_mode_ibkr_cap_does_not_apply_to_quant_data_provider(tmp_path):
@@ -363,7 +446,7 @@ def test_main_range_mode_ibkr_cap_does_not_apply_to_quant_data_provider(tmp_path
         provider=MockQuantDataIntraDay(),
         settings_path=SETTINGS_PATH,
         output_dir=tmp_path,
-        show_chart=lambda ticker, days, conflicts=None, rejected_bars=None: None,
+        show_chart=lambda ticker, days, conflicts=None, rejected_bars=None, quote_bars=None: None,
     )
 
     assert exit_code == 0
@@ -377,7 +460,7 @@ def test_main_fetches_conflicts_for_quant_data_provider_single_day(tmp_path):
         provider=fake_provider,
         settings_path=SETTINGS_PATH,
         output_dir=tmp_path,
-        show_chart=lambda ticker, days, conflicts=None, rejected_bars=None: None,
+        show_chart=lambda ticker, days, conflicts=None, rejected_bars=None, quote_bars=None: None,
     )
 
     assert exit_code == 0
@@ -393,7 +476,7 @@ def test_main_fetches_conflicts_once_for_whole_range_not_per_day(tmp_path):
         provider=fake_provider,
         settings_path=SETTINGS_PATH,
         output_dir=tmp_path,
-        show_chart=lambda ticker, days, conflicts=None, rejected_bars=None: None,
+        show_chart=lambda ticker, days, conflicts=None, rejected_bars=None, quote_bars=None: None,
     )
 
     assert exit_code == 0
@@ -410,7 +493,7 @@ def test_main_does_not_fetch_conflicts_for_ibkr_or_yahoo_providers(tmp_path):
             provider=fake_provider,
             settings_path=SETTINGS_PATH,
             output_dir=tmp_path,
-            show_chart=lambda ticker, days, conflicts=None, rejected_bars=None: None,
+            show_chart=lambda ticker, days, conflicts=None, rejected_bars=None, quote_bars=None: None,
         )
 
         assert exit_code == 0
@@ -427,7 +510,7 @@ def test_main_passes_conflicts_through_to_show_chart(tmp_path):
         provider=fake_provider,
         settings_path=SETTINGS_PATH,
         output_dir=tmp_path,
-        show_chart=lambda ticker, days, conflicts=None, rejected_bars=None: shown_calls.append(conflicts),
+        show_chart=lambda ticker, days, conflicts=None, rejected_bars=None, quote_bars=None: shown_calls.append(conflicts),
     )
 
     assert shown_calls == [[]]  # fake provider reports no conflicts, but the parameter is still threaded through
@@ -442,7 +525,7 @@ def test_main_passes_rejected_bars_through_to_show_chart(tmp_path):
         provider=fake_provider,
         settings_path=SETTINGS_PATH,
         output_dir=tmp_path,
-        show_chart=lambda ticker, days, conflicts=None, rejected_bars=None: shown_calls.append(rejected_bars),
+        show_chart=lambda ticker, days, conflicts=None, rejected_bars=None, quote_bars=None: shown_calls.append(rejected_bars),
     )
 
     assert shown_calls == [[]]  # fake provider reports none rejected, but the parameter is still threaded through
@@ -457,7 +540,151 @@ def test_main_passes_empty_conflicts_for_ibkr_provider(tmp_path):
         provider=fake_provider,
         settings_path=SETTINGS_PATH,
         output_dir=tmp_path,
-        show_chart=lambda ticker, days, conflicts=None, rejected_bars=None: shown_calls.append(conflicts),
+        show_chart=lambda ticker, days, conflicts=None, rejected_bars=None, quote_bars=None: shown_calls.append(conflicts),
     )
 
     assert shown_calls == [[]]
+
+
+def test_main_fetches_quote_bars_for_ibkr_provider_single_day(tmp_path):
+    fake_provider = _FakeProviderTrackingQuantDataFetches()
+
+    exit_code = cli.main(
+        ["SPY", "--date", "2026-01-02", "--provider", "ibkr"],
+        provider=fake_provider,
+        settings_path=SETTINGS_PATH,
+        output_dir=tmp_path,
+        show_chart=lambda ticker, days, conflicts=None, rejected_bars=None, quote_bars=None: None,
+    )
+
+    assert exit_code == 0
+    assert fake_provider.fetch_quote_bars_calls == [("SPY", date(2026, 1, 2))]
+
+
+def test_main_fetches_quote_bars_once_per_day_in_range_mode(tmp_path):
+    fake_provider = _FakeProviderTrackingQuantDataFetches()
+
+    exit_code = cli.main(
+        ["SPY", "--start-date", "2026-01-02", "--end-date", "2026-01-03", "--provider", "ibkr"],
+        provider=fake_provider,
+        settings_path=SETTINGS_PATH,
+        output_dir=tmp_path,
+        show_chart=lambda ticker, days, conflicts=None, rejected_bars=None, quote_bars=None: None,
+    )
+
+    assert exit_code == 0
+    assert fake_provider.fetch_quote_bars_calls == [("SPY", date(2026, 1, 2)), ("SPY", date(2026, 1, 3))]
+
+
+def test_main_does_not_fetch_quote_bars_for_quant_data_or_yahoo_providers(tmp_path):
+    for provider_name in (cli.PROVIDER_QUANT_DATA, cli.PROVIDER_YAHOO):
+        fake_provider = _FakeProviderTrackingQuantDataFetches()
+
+        exit_code = cli.main(
+            ["SPY", "--date", "2026-01-02", "--provider", provider_name],
+            provider=fake_provider,
+            settings_path=SETTINGS_PATH,
+            output_dir=tmp_path,
+            show_chart=lambda ticker, days, conflicts=None, rejected_bars=None, quote_bars=None: None,
+        )
+
+        assert exit_code == 0
+        assert fake_provider.fetch_quote_bars_calls == []
+
+
+def test_main_passes_quote_bars_through_to_show_chart_and_csv(tmp_path):
+    quote_bar = QuoteBar(
+        timestamp=datetime(2026, 1, 2, 14, 30, tzinfo=timezone.utc),
+        wap=1.5,
+        trade_count=10,
+        avg_bid=0.9,
+        avg_ask=1.1,
+    )
+
+    class _FakeIBKRProvider(_FakeProviderTrackingQuantDataFetches):
+        def fetch_quote_bars(self, ticker: str, target_date: date) -> list[QuoteBar]:
+            self.fetch_quote_bars_calls.append((ticker, target_date))
+            return [quote_bar]
+
+    fake_provider = _FakeIBKRProvider()
+    shown_calls = []
+
+    cli.main(
+        ["SPY", "--date", "2026-01-02", "--provider", "ibkr"],
+        provider=fake_provider,
+        settings_path=SETTINGS_PATH,
+        output_dir=tmp_path,
+        show_chart=lambda ticker, days, conflicts=None, rejected_bars=None, quote_bars=None: shown_calls.append(quote_bars),
+    )
+
+    assert shown_calls == [[quote_bar]]
+
+    csv_path = tmp_path / "SPY_2026-01-02_data.csv"
+    csv_text = csv_path.read_text(encoding="utf-8")
+    assert "1.5,10,0.9,1.1" in csv_text
+
+
+def test_main_passes_none_quote_bars_to_show_chart_when_none_fetched(tmp_path):
+    fake_provider = _FakeProviderTrackingQuantDataFetches()
+    shown_calls = []
+
+    cli.main(
+        ["SPY", "--date", "2026-01-02", "--provider", "ibkr"],
+        provider=fake_provider,
+        settings_path=SETTINGS_PATH,
+        output_dir=tmp_path,
+        show_chart=lambda ticker, days, conflicts=None, rejected_bars=None, quote_bars=None: shown_calls.append(quote_bars),
+    )
+
+    assert shown_calls == [None]
+
+
+def test_main_fetches_quote_bars_for_massive_provider(tmp_path):
+    fake_provider = _FakeProviderTrackingQuantDataFetches()
+
+    exit_code = cli.main(
+        ["SPY", "--date", "2026-01-02", "--provider", "massive"],
+        provider=fake_provider,
+        settings_path=SETTINGS_PATH,
+        output_dir=tmp_path,
+        show_chart=lambda ticker, days, conflicts=None, rejected_bars=None, quote_bars=None: None,
+    )
+
+    assert exit_code == 0
+    assert fake_provider.fetch_quote_bars_calls == [("SPY", date(2026, 1, 2))]
+
+
+def test_main_reaches_massive_quote_bars_via_csv_but_not_the_chart(tmp_path):
+    # Per the user's explicit call: Massive/yfinance charts stay exactly as they are (no bid/ask
+    # panel -- Massive never has avg_bid/avg_ask anyway) -- only the CSV export gains the new
+    # wap/trade_count columns for --provider massive.
+    quote_bar = QuoteBar(
+        timestamp=datetime(2026, 1, 2, 14, 30, tzinfo=timezone.utc),
+        wap=471.9,
+        trade_count=42,
+        avg_bid=None,
+        avg_ask=None,
+    )
+
+    class _FakeMassiveProvider(_FakeProviderTrackingQuantDataFetches):
+        def fetch_quote_bars(self, ticker: str, target_date: date) -> list[QuoteBar]:
+            self.fetch_quote_bars_calls.append((ticker, target_date))
+            return [quote_bar]
+
+    fake_provider = _FakeMassiveProvider()
+    shown_calls = []
+
+    cli.main(
+        ["SPY", "--date", "2026-01-02", "--provider", "massive"],
+        provider=fake_provider,
+        settings_path=SETTINGS_PATH,
+        output_dir=tmp_path,
+        show_chart=lambda ticker, days, conflicts=None, rejected_bars=None, quote_bars=None: shown_calls.append(quote_bars),
+    )
+
+    # Chart never sees Massive's quote_bars -- no bid/ask panel for this provider.
+    assert shown_calls == [None]
+
+    csv_path = tmp_path / "SPY_2026-01-02_data.csv"
+    csv_text = csv_path.read_text(encoding="utf-8")
+    assert "471.9,42,," in csv_text
