@@ -4,7 +4,7 @@ import json
 from datetime import date, datetime
 from pathlib import Path
 
-from defs.protocols import BarConflict, DayBar, ProviderBar
+from defs.protocols import BarConflict, DayBar, ProviderBar, QuoteBar
 from shared.errors import AppError
 from shared.sessions import infer_session
 
@@ -55,4 +55,10 @@ class MockQuantDataIntraDay:
         # Same reasoning as fetch_conflicts above -- no fixture data yet (quant-scratch#16's
         # rejected-whistleblower-bar handling is deferred until quant-data's own outlier-detection
         # check ships real REJECTED data), this just needs to exist for CLI-level tests.
+        return []
+
+    def fetch_quote_bars(self, ticker: str, target_date: date) -> list[QuoteBar]:
+        # This mock stands in for whatever provider a test injects, including tests that leave
+        # --provider at its "ibkr" CLI default -- day-chart's ibkr-only enrichment step calls this
+        # unconditionally in that case, so it needs to exist even though this mock isn't IBKR.
         return []

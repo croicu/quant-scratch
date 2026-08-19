@@ -54,6 +54,21 @@ rather than something provider-specific.
   identical to a conflict's whistleblower/candidate entry, so introducing a distinct
   `RejectedWhistleblowerBar`-mirroring type here would just duplicate `ProviderBar` for no
   behavioral difference. See `QuantDataIntraDay.fetch_rejected_bars` below.
+  `QuoteBar` (`timestamp: datetime` UTC-aware, `wap`/`trade_count`/`avg_bid`/`avg_ask`, all
+  `| None`) is per-provider enrichment data beyond plain OHLCV
+  ([croicu/quant-scratch#26](https://github.com/croicu/quant-scratch/issues/26)), originally named
+  `IBKRQuoteBar` before Massive became a second real consumer of the identical shape (renamed once
+  a second concrete use case existed, not speculatively). Deliberately kept off `DayBar` (which
+  stays pure OHLCV, shared unchanged by every `IntraDayProvider`) — same reasoning as `BarConflict`
+  above, a provider-specific extra rather than a shared-interface field. Two producers today: IBKR
+  (`IBKRIntraDay.fetch_quote_bars` — WAP/trade count from the same `TRADES` bar already fetched for
+  OHLCV, previously discarded; avg_bid/avg_ask from a separate `BID_ASK` call, all four fields
+  potentially populated) and Massive (`MassiveIntraDay.fetch_quote_bars` — WAP/trade count from the
+  same aggregates call already fetched for OHLCV; avg_bid/avg_ask always `None`, since Massive's
+  free tier has no bid/ask product at all). All fields Optional both because a provider may simply
+  never have a field (Massive's avg_bid/avg_ask) and because IBKR's `TRADES`/`BID_ASK` calls can
+  (confirmed live) return different bar counts for the same window — see each provider's own
+  `fetch_quote_bars` below for its merge policy.
 - `contracts.py` — behavioral interfaces: `YahooFinanceProvider(Protocol)` — `fetch_quote(ticker) -> StockQuote`;
   `IntraDayProvider(Protocol)` — `fetch_bars(ticker, target_date) -> list[DayBar]`. `BarConflict`
   fetching (`QuantDataIntraDay.fetch_conflicts`) and rejected-bar fetching
@@ -277,6 +292,24 @@ and has no CLI/console script of its own.
     startup -- `StartupFetch(0)` (an empty flag set) skips it entirely, incidentally also cutting
     `connect()` from ~10s (spent on those requests timing out) down to under 10ms.
 
+    The connect/qualify/`reqHistoricalData`/disconnect sequence is factored into a private
+    `_fetch_raw_bars(ticker, target_date, method) -> list[BarData]`, parameterized by IBKR's own
+    `whatToShow` value -- `fetch_bars` is now a thin wrapper calling it with `method="TRADES"`,
+    unchanged behavior/signature. `fetch_quote_bars(ticker, target_date) -> list[QuoteBar]`
+    ([croicu/quant-scratch#26](https://github.com/croicu/quant-scratch/issues/26)) calls it twice
+    -- `method="TRADES"` again for `wap`/`trade_count` (`BarData.average`/`.barCount`, already
+    returned by every `TRADES` bar but previously discarded), `method="BID_ASK"` for
+    `avg_bid`/`avg_ask` (`BarData.open`/`.close` -- IBKR's own semantics for a `BID_ASK` bar: open
+    is the time-averaged bid, close the time-averaged ask) -- then left-joins the two on the
+    `TRADES` call's timestamps (confirmed live: `TRADES` and `BID_ASK` can return different bar
+    counts for the same window, e.g. 16 vs 15). Deliberately a second independent `TRADES` call
+    rather than sharing `fetch_bars`'s own -- keeps `DayBar`/`QuoteBar` fully decoupled at the
+    cost of one redundant IBKR call (3 calls/day total once both methods are used, up from 1);
+    `day_chart.cli`'s 30-day `--provider ibkr` range cap is unchanged and untested at this higher
+    call volume. Wired into `day_chart.cli` as an always-on, `--provider ibkr`-only step (same
+    "no separate flag" precedent as quant-data's `fetch_conflicts`/`fetch_rejected_bars` below) --
+    see `day_chart` notes further down.
+
     `IBKRQuote`, alongside it in the same file (same external source, same connection lifecycle),
     implements `defs.contracts.YahooFinanceProvider.fetch_quote(ticker) -> StockQuote`. Built for
     `stock-quote`'s `--provider ibkr`
@@ -428,6 +461,22 @@ US/Eastern timestamp strings. `v` (volume) comes back as a float in practice (ob
 values on real data) and is truncated via `int(...)`, same as every other provider's own volume
 cast.
 
+`fetch_quote_bars(ticker, target_date) -> list[QuoteBar]`
+([croicu/quant-scratch#26](https://github.com/croicu/quant-scratch/issues/26)) exposes the
+aggregates response's `vw` (WAP)/`n` (trade count) fields, present on every bar `fetch_bars`
+already fetches but previously discarded. Unlike `IBKRIntraDay.fetch_quote_bars`, this issues *no*
+additional HTTP request: `fetch_bars` stashes its raw `results` list in
+`self._raw_bars_cache[(ticker, target_date)]` right before returning, and `fetch_quote_bars` just
+reads it back — re-fetching the exact data a prior call already has in hand would be pure waste
+against the free tier's hard 5-calls/minute ceiling (unlike IBKR's local Gateway, which has no such
+constraint). Raises `AppError` if called for a `(ticker, target_date)` `fetch_bars` hasn't
+succeeded for yet — this is a "call `fetch_bars` first" contract, not a network failure. `avg_bid`/
+`avg_ask` are always `None`: the free Basic tier has no bid/ask/NBBO product at any price point
+without a paid-tier upgrade (confirmed live: `/v3/quotes` 403s "not entitled," see
+`tasks/ingestion_variable_inventory.md`), so there's no second call to make the way IBKR's
+`BID_ASK` request is. Cache is keyed per-instance and never cleared — day-chart constructs a fresh
+`MassiveIntraDay` per CLI invocation, so no cross-run staleness risk.
+
 Retries on HTTP 429 (rate-limited) specifically, same `max_attempts`/`retry_delay_seconds`/
 `sleep_fn`-injectable shape as `shared/providers/databento.py`'s own retry loop, but keyed off
 `requests.exceptions.HTTPError.response.status_code == 429` rather than a client/server-error SDK
@@ -487,13 +536,30 @@ implementation plus `Settings`/`Logger`/`AppError`. No dependency on `quant_data
 `matplotlib.pyplot` outside its own `chart.py`/`shared/providers/` — bar (and conflict) fetching is
 confined to `shared/providers/quant_data.py`.
 
-- `output.py` — `bars_to_csv(bars) -> str`; columns include `incomplete`. No `BarConflict` export —
-  the pending-resolution display is chart-only by design, `bars_to_csv`/`CSV_HEADERS` untouched.
+- `output.py` — `bars_to_csv(bars, quote_bars: list[QuoteBar] | None = None) -> str`; columns
+  include `incomplete`, plus `wap`/`trade_count`/`avg_bid`/`avg_ask` (always in the header,
+  regardless of provider). `quote_bars` is left-joined onto `bars` by matching `timestamp` — a
+  `DayBar` row with no matching `QuoteBar` (or `quote_bars=None`, every non-`ibkr`/`massive`
+  provider) gets blank strings for the four new columns, same policy `IBKRIntraDay.fetch_quote_bars`
+  uses internally for its own `TRADES`/`BID_ASK` merge (see that provider's notes above). `massive`
+  populates `wap`/`trade_count` the same way but `avg_bid`/`avg_ask` always come through blank — its
+  `QuoteBar`s never set them. No
+  `BarConflict` export — the pending-resolution display is chart-only by design. The `timestamp`
+  column is written as `bar.timestamp.astimezone(EASTERN).strftime("%Y-%m-%d %H:%M:%S")`, not
+  `DayBar.timestamp`'s own UTC `isoformat()` — Excel doesn't parse ISO 8601's `T` separator + UTC
+  offset as a real datetime (imports as text), while this plain local-ET format opens natively.
+  Matches the popup chart's own x-axis timezone (`chart.py`'s `EASTERN`). Safe from the usual
+  local-time DST-ambiguity trap (a repeated wall-clock hour at the fall-back transition) since
+  `day-chart` only ever fetches within the 4:00-20:00 ET session window
+  (`ibkr.py`'s `_AFTER_MARKET_CLOSE`), nowhere near the 2am ET transition.
 - `chart.py` — `DayChartData = tuple[date, list[DayBar]]` (one day's session date + its bars).
   `render_chart(ticker, days: list[DayChartData], conflicts: list[BarConflict] | None = None,
-  rejected_bars: list[ProviderBar] | None = None) -> Figure`; pure figure construction, a 2×N grid
-  (N = `len(days)`) built via a single `plt.subplots(2, N, sharex="col", squeeze=False,
-  dpi=100, gridspec_kw={"height_ratios": [3, 1]}, layout="constrained")` — `sharex="col"` links each
+  rejected_bars: list[ProviderBar] | None = None, quote_bars: list[QuoteBar] | None = None) ->
+  Figure`; pure figure construction, a grid of 2 or 3 rows × N columns
+  (N = `len(days)`) — 3 rows only when `quote_bars is not None` (every non-`ibkr` caller passes
+  `None`, keeping the grid at 2 rows with zero behavior change), built via a single
+  `plt.subplots(row_count, N, sharex="col", squeeze=False,
+  dpi=100, gridspec_kw={"height_ratios": [3, 1]} or `[3, 1, 1]`, layout="constrained")` — `sharex="col"` links each
   day's own price/volume pair without linking across days (each day gets its own
   midnight-to-midnight x-axis, since the calendar dates differ), `height_ratios` keeps every day's
   own price:volume split at 3:1, and `layout="constrained"` (rather than `tight_layout()`) avoids a
@@ -539,7 +605,16 @@ confined to `shared/providers/quant_data.py`.
   candle at that timestamp without introducing a second offset constant. Same
   quant-data-only-in-practice, `chart.py`-doesn't-gate-it-itself shape as `conflicts`.
 
-  `show_chart(ticker, days, conflicts=None, rejected_bars=None)`
+  `quote_bars` (default `None`, meaning "no third row" — distinct from `conflicts`/`rejected_bars`,
+  where `None` still draws on the existing 2-row grid) draws a third subplot per day column
+  (`_draw_bid_ask`) plotting `avg_bid`/`avg_ask` as two lines, using only that day's entries with
+  both fields non-`None` (unlike the CSV's left join against every `DayBar` timestamp, the chart
+  just needs the points it has). `wap`/`trade_count` are CSV-only, not charted. `day_chart.cli`
+  only ever passes a non-`None` value for `--provider ibkr`, and only when at least one day's
+  `fetch_quote_bars` call actually returned data — every other provider/failure path keeps the
+  original 2-row layout, so existing `render_chart` callers are unaffected either way.
+
+  `show_chart(ticker, days, conflicts=None, rejected_bars=None, quote_bars=None)`
   is the interactive entry point: switches to the `TkAgg` backend, calls `render_chart`, shows the
   figure non-blocking (`plt.show(block=False)`), registers a `close_event` callback on
   `figure.canvas` that flips a flag, then polls the GUI event loop itself
@@ -595,8 +670,8 @@ confined to `shared/providers/quant_data.py`.
   separate from `render_chart` specifically so unit tests can exercise figure construction without
   ever touching a GUI backend.
 - `cli.py` — `day-chart` entry point; `main()` takes optional `provider: IntraDayProvider`,
-  `settings_path: Path`, `output_dir: Path`, and `show_chart: ShowChartFn` (`Callable[[str,
-  list[DayChartData], list[BarConflict]], None]`) parameters — same parameter-based DI pattern as `stock_quote.cli`
+  `settings_path: Path`, `output_dir: Path`, and `show_chart: ShowChartFn` (see its full signature
+  further down) parameters — same parameter-based DI pattern as `stock_quote.cli`
   (tests inject a non-GUI stand-in for `show_chart`, same reason `provider` is injected instead of
   hitting a real database/Gateway). `--provider {ibkr,quant-data,yahoo,databento,massive}` (default
   `ibkr`) selects which data source backs the default construction path — a real behavior change from when
@@ -634,15 +709,24 @@ confined to `shared/providers/quant_data.py`.
   settings at all). `output_dir` has no CLI flag
   (`--output-dir` was deliberately deferred); it exists purely as a test seam, the same role
   `settings_path` plays — it now only affects where the CSV lands, since the chart itself is shown
-  in a popup rather than saved. Owns `resolve_session_date(date_argument, today)` — resolves the
-  `--date` argument to a concrete session date, defaulting to today or rolling back to the prior
-  Friday if today is a weekend, and raising `AppError` for a malformed, future, or weekend date —
-  used when neither `--start-date` nor `--end-date` is given. Also owns
-  `resolve_date_range(start_date_argument, end_date_argument, today)` — used instead of
-  `resolve_session_date` whenever either range flag is given (`--date` is ignored in that case):
-  `--end-date` alone defaults its start to the same day (so `--end-date X` alone behaves like
-  `--date X`); `--start-date` alone defaults its end to today's `resolve_session_date`-style default;
-  both given must satisfy `start <= end` (`AppError` otherwise). Individual range bounds are only
+  in a popup rather than saved. Owns `resolve_session_date(date_argument, today, default_lookback_days=0)`
+  — resolves the `--date` argument to a concrete session date, defaulting to today or rolling back
+  to the prior Friday if today is a weekend, and raising `AppError` for a malformed, future, or
+  weekend date — used when neither `--start-date` nor `--end-date` is given. `default_lookback_days`
+  only affects that no-argument default path (an explicit `--date` is parsed/validated against the
+  real `today` either way) — `main()` passes `MASSIVE_DEFAULT_LOOKBACK_DAYS` (1) for
+  `--provider massive`, `0` (unchanged behavior) for every other provider: Massive's free tier has
+  no same-day data at all (confirmed live — a same-day request 403s, "Your plan doesn't include
+  this data timeframe," while yesterday and earlier succeed), so the ordinary today-based default
+  would reliably fail for this provider specifically; shifting the default back a day sidesteps
+  needing to know Massive's exact same-day cutoff time
+  ([issue #26](https://github.com/croicu/quant-scratch/issues/26)). Also owns
+  `resolve_date_range(start_date_argument, end_date_argument, today, default_lookback_days=0)` —
+  used instead of `resolve_session_date` whenever either range flag is given (`--date` is ignored
+  in that case): `--end-date` alone defaults its start to the same day (so `--end-date X` alone
+  behaves like `--date X`); `--start-date` alone defaults its end to today's
+  `resolve_session_date`-style default (same `default_lookback_days` wiring for `--provider
+  massive`); both given must satisfy `start <= end` (`AppError` otherwise). Individual range bounds are only
   format/future-validated, *not* weekend-rejected like `resolve_session_date` — a range legitimately
   spans weekends, which `main()` then skips. In range mode with `--provider ibkr`, a resolved range
   longer than `MAX_IBKR_RANGE_DAYS` (30) is rejected with `AppError` before any `fetch_bars` call —
@@ -684,6 +768,22 @@ confined to `shared/providers/quant_data.py`.
   range cap above is also gated on the flag rather than an `isinstance` check
   ([issue #15](https://github.com/croicu/quant-scratch/issues/15),
   [issue #16](https://github.com/croicu/quant-scratch/issues/16)).
+
+  When `--provider ibkr` *or* `massive` is selected, `main()` also calls
+  `active_provider.fetch_quote_bars(ticker, session_date)` once per successfully-charted day
+  (accumulated into a flat `quote_bars` list, same flat-list shape `all_bars` already uses) and
+  threads the result into `bars_to_csv` for both providers. A per-day `fetch_quote_bars` failure is
+  caught and logged (category `date_range`, same as the ordinary per-day skip) without dropping
+  that day's OHLCV — unlike a `fetch_bars` failure, losing quote-bar enrichment doesn't invalidate
+  the rest of the day's data ([issue #26](https://github.com/croicu/quant-scratch/issues/26)).
+  `show_chart`'s 5th argument is gated further, separately from the CSV: a distinct
+  `chart_quote_bars` value is `None` unless the provider is specifically `ibkr` *and* `quote_bars`
+  is non-empty — Massive's bid/ask panel would always be empty (it never has `avg_bid`/`avg_ask`),
+  and the user explicitly asked for the Massive/yfinance chart layouts to stay untouched, so
+  `chart.py` only ever sees non-`None` `quote_bars` for `ibkr`. See `chart.py`'s `quote_bars` note
+  above for why `None` vs. `[]` matters to it specifically. `ShowChartFn`
+  (`Callable[[str, list[DayChartData], list[BarConflict], list[ProviderBar],
+  list[QuoteBar]], None]`) gained this 5th parameter accordingly.
 
 ### `open_quant_data` — Excel/Postgres SSH tunnel launcher
 
@@ -806,7 +906,12 @@ own `README.md`.
   logic is covered directly against `QuantDataIntraDay` in `test_quant_data_provider.py` instead.
   Same shape for `fetch_rejected_bars(ticker, start_date, end_date) -> list[ProviderBar]`, also
   always `[]` — no fixture data exists (or can meaningfully exist yet; see issue #16's
-  deferred-testing note above).
+  deferred-testing note above). Also has `fetch_quote_bars(ticker, target_date) -> list[QuoteBar]`,
+  always `[]` — not because this mock stands in for `IBKRIntraDay`/`MassiveIntraDay` (it doesn't
+  stand in for either), but because `day_chart.cli.main` calls it unconditionally whenever
+  `--provider` is left at its `ibkr` CLI default, which several CLI-level tests do incidentally
+  while actually exercising unrelated behavior with this mock injected; the method just needs to
+  exist for those tests to keep working ([issue #26](https://github.com/croicu/quant-scratch/issues/26)).
 - `tests/data/settings.json` — fixture settings file, DI'd into `Settings.load(path=...)` via
   `stock_quote.cli.main`'s (and `day_chart.cli.main`'s) `settings_path` parameter, so CLI tests
   don't depend on cwd isolation. Deliberately has no `postgres` section — exercises the "missing
@@ -856,12 +961,24 @@ than failing the whole command — → `list[DayChartData]` (`(date, list[DayBar
 When `--provider quant-data`, also → `QuantDataIntraDay.fetch_conflicts` and
 `QuantDataIntraDay.fetch_rejected_bars` (each once for the whole resolved range; silent no-op →
 `[]` for `ibkr`/`yahoo`/`databento`/`massive`) → `list[BarConflict]` and `list[ProviderBar]` respectively.
-All four (`days`, `conflicts`, `rejected_bars` alongside `ticker`) → injected `show_chart` (real:
-`chart.show_chart`, a blocking popup window rendering red/blue candlesticks for any conflicts and
-orange candlesticks for any rejected bars; test: a non-GUI stand-in) and, after flattening every
-charted day's bars into one list, `output.bars_to_csv` (→ `<TICKER>_<DATE>_data.csv` for a single
-day, `<TICKER>_<START>_<END>_data.csv` for a range; written to `output_dir`, CWD by default —
-neither `BarConflict` nor rejected-bar data reaches the CSV, chart-only by design).
+When `--provider ibkr` or `massive`, also → `IBKRIntraDay.fetch_quote_bars`/
+`MassiveIntraDay.fetch_quote_bars` once per successfully-charted day (a per-day failure is logged
+as a warning and only that day's enrichment is dropped, not its OHLCV — unlike a `fetch_bars`
+failure) → accumulated `list[QuoteBar]` ([issue #26](https://github.com/croicu/quant-scratch/issues/26)).
+This list always reaches `output.bars_to_csv` (or `None` if every day's call failed/returned
+nothing) for both providers, but only reaches `show_chart`'s 5th argument for `ibkr` — a separate
+`chart_quote_bars` value stays `None` for `massive` even when real data was fetched, since its
+`QuoteBar`s never have `avg_bid`/`avg_ask` and the chart layout is deliberately left untouched for
+that provider. All five (`days`, `conflicts`, `rejected_bars`, `chart_quote_bars` alongside
+`ticker`) → injected `show_chart` (real: `chart.show_chart`, a blocking popup window rendering
+red/blue candlesticks for any conflicts, orange candlesticks for any rejected bars, and a third
+bid/ask panel only when its 5th argument is not `None`, i.e. only ever for `ibkr`; test: a non-GUI
+stand-in) and, after flattening every charted day's bars into one list, `output.bars_to_csv` (→
+`<TICKER>_<DATE>_data.csv` for a single day, `<TICKER>_<START>_<END>_data.csv` for a range; written
+to `output_dir`, CWD by default — `BarConflict`/rejected-bar data still doesn't reach the CSV,
+chart-only by design; `quote_bars`
+does, left-joined onto `bars` by timestamp into the `wap`/`trade_count`/`avg_bid`/`avg_ask`
+columns).
 
 ## Contracts
 

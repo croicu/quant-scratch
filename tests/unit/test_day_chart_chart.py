@@ -292,7 +292,7 @@ def test_show_chart_forwards_conflicts_to_render_chart(monkeypatch):
     conflicts = [_conflict(14, 30)]
     received = []
 
-    def fake_render_chart(ticker, days, passed_conflicts=None, passed_rejected_bars=None):
+    def fake_render_chart(ticker, days, passed_conflicts=None, passed_rejected_bars=None, passed_quote_bars=None):
         received.append(passed_conflicts)
         real_figure = chart.plt.figure()
         return real_figure
@@ -317,7 +317,7 @@ def test_show_chart_forwards_rejected_bars_to_render_chart(monkeypatch):
     rejected_bars = [_rejected_bar(14, 30)]
     received = []
 
-    def fake_render_chart(ticker, days, passed_conflicts=None, passed_rejected_bars=None):
+    def fake_render_chart(ticker, days, passed_conflicts=None, passed_rejected_bars=None, passed_quote_bars=None):
         received.append(passed_rejected_bars)
         real_figure = chart.plt.figure()
         return real_figure
@@ -396,8 +396,8 @@ def _patch_show_chart_for_window_tests(
 
     real_render_chart = chart.render_chart
 
-    def render_chart_with_fake_window(ticker, days, conflicts=None, rejected_bars=None):
-        figure = real_render_chart(ticker, days, conflicts, rejected_bars)
+    def render_chart_with_fake_window(ticker, days, conflicts=None, rejected_bars=None, quote_bars=None):
+        figure = real_render_chart(ticker, days, conflicts, rejected_bars, quote_bars)
         figure.canvas.manager.window = fake_window
         return figure
 

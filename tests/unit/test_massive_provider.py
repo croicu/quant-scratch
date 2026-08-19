@@ -156,3 +156,54 @@ def test_fetch_bars_respects_custom_max_attempts_and_retry_delay():
         provider.fetch_bars("spy", _TARGET_DATE)
 
     assert sleep.calls == [5.0]
+
+
+def test_fetch_quote_bars_reads_wap_and_trade_count_from_fetch_bars_cache_without_a_second_call():
+    call_count = {"count": 0}
+
+    def counting_request(url: str, params: dict) -> dict:
+        call_count["count"] += 1
+        return _SAMPLE_PAYLOAD
+
+    provider = MassiveIntraDay(api_key="test-key", request_fn=counting_request)
+    provider.fetch_bars("spy", _TARGET_DATE)
+
+    quote_bars = provider.fetch_quote_bars("spy", _TARGET_DATE)
+
+    # Free tier is hard rate-limited to 5 calls/minute -- fetch_quote_bars must reuse fetch_bars's
+    # own response rather than issuing its own request.
+    assert call_count["count"] == 1
+    assert len(quote_bars) == 2
+    assert quote_bars[0].timestamp < quote_bars[1].timestamp
+    assert quote_bars[0].wap == 745.3721
+    assert quote_bars[0].trade_count == 454
+    assert quote_bars[1].wap == 745.14
+    assert quote_bars[1].trade_count == 288
+
+
+def test_fetch_quote_bars_avg_bid_and_avg_ask_are_always_none():
+    # Massive's free Basic tier has no bid/ask/NBBO product at all (confirmed live -- /v3/quotes
+    # 403s "not entitled"), unlike IBKR's separate BID_ASK call.
+    provider = MassiveIntraDay(api_key="test-key", request_fn=lambda url, params: _SAMPLE_PAYLOAD)
+    provider.fetch_bars("spy", _TARGET_DATE)
+
+    quote_bars = provider.fetch_quote_bars("spy", _TARGET_DATE)
+
+    for quote_bar in quote_bars:
+        assert quote_bar.avg_bid is None
+        assert quote_bar.avg_ask is None
+
+
+def test_fetch_quote_bars_raises_when_fetch_bars_was_not_called_first():
+    provider = MassiveIntraDay(api_key="test-key", request_fn=lambda url, params: _SAMPLE_PAYLOAD)
+
+    with pytest.raises(AppError, match="fetch_bars must be called"):
+        provider.fetch_quote_bars("spy", _TARGET_DATE)
+
+
+def test_fetch_quote_bars_is_scoped_to_its_own_ticker_and_date():
+    provider = MassiveIntraDay(api_key="test-key", request_fn=lambda url, params: _SAMPLE_PAYLOAD)
+    provider.fetch_bars("spy", _TARGET_DATE)
+
+    with pytest.raises(AppError, match="fetch_bars must be called"):
+        provider.fetch_quote_bars("spy", date(2026, 8, 1))

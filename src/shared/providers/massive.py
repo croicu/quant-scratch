@@ -7,7 +7,7 @@ from datetime import date, datetime, timezone
 import requests
 from requests.exceptions import HTTPError
 
-from defs.protocols import DayBar
+from defs.protocols import DayBar, QuoteBar
 
 from ..diagnostics import Logger
 from ..errors import AppError
@@ -49,6 +49,13 @@ class MassiveIntraDay:
         self._max_attempts = max_attempts
         self._retry_delay_seconds = retry_delay_seconds
         self._sleep = time_module.sleep if sleep_fn is None else sleep_fn
+        # fetch_quote_bars reads vw/n out of fetch_bars's own response instead of issuing a second
+        # HTTP call -- the free tier is hard rate-limited to 5 calls/minute, so a duplicate request
+        # just to re-extract fields the first call already returned would be pure waste. Keyed by
+        # (ticker, target_date); populated at the end of a successful fetch_bars call, read (not
+        # cleared) by fetch_quote_bars. Scoped to this instance's lifetime -- day-chart constructs
+        # a fresh MassiveIntraDay per CLI invocation, so no cross-run staleness to worry about.
+        self._raw_bars_cache: dict[tuple[str, date], list[dict]] = {}
 
     def fetch_bars(self, ticker: str, target_date: date) -> list[DayBar]:
         normalized_ticker = ticker.upper()
@@ -98,7 +105,7 @@ class MassiveIntraDay:
 
         bars: list[DayBar] = []
         for raw_bar in raw_bars:
-            timestamp_utc = datetime.fromtimestamp(raw_bar["t"] / 1000, tz=timezone.utc)
+            timestamp_utc = _raw_bar_timestamp(raw_bar)
             bar = DayBar(
                 timestamp=timestamp_utc,
                 open=float(raw_bar["o"]),
@@ -114,6 +121,7 @@ class MassiveIntraDay:
             bars.append(bar)
 
         bars.sort(key=_bar_timestamp)
+        self._raw_bars_cache[(normalized_ticker, target_date)] = raw_bars
 
         Logger.info(
             f"massive: fetched {len(bars)} intraday bars for {normalized_ticker} on {target_date.isoformat()}.",
@@ -121,9 +129,46 @@ class MassiveIntraDay:
         )
         return bars
 
+    def fetch_quote_bars(self, ticker: str, target_date: date) -> list[QuoteBar]:
+        # Reads vw (WAP)/n (trade count) out of fetch_bars's own cached response for the same
+        # ticker/date -- see _raw_bars_cache's own comment for why this deliberately doesn't issue
+        # a second HTTP call. avg_bid/avg_ask are always None: Massive's free Basic tier has no
+        # bid/ask/NBBO product at all (confirmed live -- /v3/quotes 403s "not entitled"), unlike
+        # IBKR where a second BID_ASK call supplies them.
+        normalized_ticker = ticker.upper()
+        cached_raw_bars = self._raw_bars_cache.get((normalized_ticker, target_date))
+        if cached_raw_bars is None:
+            raise AppError(
+                f"No cached Massive response for '{normalized_ticker}' on {target_date.isoformat()} -- "
+                "fetch_bars must be called for the same ticker/date before fetch_quote_bars."
+            )
+
+        quote_bars: list[QuoteBar] = []
+        for raw_bar in cached_raw_bars:
+            quote_bars.append(
+                QuoteBar(
+                    timestamp=_raw_bar_timestamp(raw_bar),
+                    wap=raw_bar.get("vw"),
+                    trade_count=raw_bar.get("n"),
+                    avg_bid=None,
+                    avg_ask=None,
+                )
+            )
+
+        quote_bars.sort(key=_quote_bar_timestamp)
+        return quote_bars
+
 
 def _bar_timestamp(bar: DayBar) -> datetime:
     return bar.timestamp
+
+
+def _quote_bar_timestamp(quote_bar: QuoteBar) -> datetime:
+    return quote_bar.timestamp
+
+
+def _raw_bar_timestamp(raw_bar: dict) -> datetime:
+    return datetime.fromtimestamp(raw_bar["t"] / 1000, tz=timezone.utc)
 
 
 def _request(url: str, params: dict) -> dict:
