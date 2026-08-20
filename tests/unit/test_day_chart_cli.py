@@ -576,20 +576,72 @@ def test_main_fetches_quote_bars_once_per_day_in_range_mode(tmp_path):
     assert fake_provider.fetch_quote_bars_calls == [("SPY", date(2026, 1, 2)), ("SPY", date(2026, 1, 3))]
 
 
-def test_main_does_not_fetch_quote_bars_for_quant_data_or_yahoo_providers(tmp_path):
-    for provider_name in (cli.PROVIDER_QUANT_DATA, cli.PROVIDER_YAHOO):
-        fake_provider = _FakeProviderTrackingQuantDataFetches()
+def test_main_does_not_fetch_quote_bars_for_yahoo_provider(tmp_path):
+    fake_provider = _FakeProviderTrackingQuantDataFetches()
 
-        exit_code = cli.main(
-            ["SPY", "--date", "2026-01-02", "--provider", provider_name],
-            provider=fake_provider,
-            settings_path=SETTINGS_PATH,
-            output_dir=tmp_path,
-            show_chart=lambda ticker, days, conflicts=None, rejected_bars=None, quote_bars=None: None,
-        )
+    exit_code = cli.main(
+        ["SPY", "--date", "2026-01-02", "--provider", cli.PROVIDER_YAHOO],
+        provider=fake_provider,
+        settings_path=SETTINGS_PATH,
+        output_dir=tmp_path,
+        show_chart=lambda ticker, days, conflicts=None, rejected_bars=None, quote_bars=None: None,
+    )
 
-        assert exit_code == 0
-        assert fake_provider.fetch_quote_bars_calls == []
+    assert exit_code == 0
+    assert fake_provider.fetch_quote_bars_calls == []
+
+
+def test_main_fetches_quote_bars_for_quant_data_provider(tmp_path):
+    fake_provider = _FakeProviderTrackingQuantDataFetches()
+
+    exit_code = cli.main(
+        ["SPY", "--date", "2026-01-02", "--provider", "quant-data"],
+        provider=fake_provider,
+        settings_path=SETTINGS_PATH,
+        output_dir=tmp_path,
+        show_chart=lambda ticker, days, conflicts=None, rejected_bars=None, quote_bars=None: None,
+    )
+
+    assert exit_code == 0
+    assert fake_provider.fetch_quote_bars_calls == [("SPY", date(2026, 1, 2))]
+
+
+def test_main_reaches_quant_data_quote_bars_via_both_csv_and_chart(tmp_path):
+    # Unlike massive, quant-data can populate avg_bid/avg_ask (IBKR-sourced under the hood) -- it
+    # gets the same bid/ask chart panel ibkr does, not the CSV-only treatment massive gets.
+    quote_bar = QuoteBar(
+        timestamp=datetime(2026, 1, 2, 14, 30, tzinfo=timezone.utc),
+        wap=None,
+        trade_count=None,
+        avg_bid=471.4,
+        avg_ask=471.6,
+        midpoint_open=471.45,
+        midpoint_high=471.75,
+        midpoint_low=471.35,
+        midpoint_close=471.55,
+    )
+
+    class _FakeQuantDataProvider(_FakeProviderTrackingQuantDataFetches):
+        def fetch_quote_bars(self, ticker: str, target_date: date) -> list[QuoteBar]:
+            self.fetch_quote_bars_calls.append((ticker, target_date))
+            return [quote_bar]
+
+    fake_provider = _FakeQuantDataProvider()
+    shown_calls = []
+
+    cli.main(
+        ["SPY", "--date", "2026-01-02", "--provider", "quant-data"],
+        provider=fake_provider,
+        settings_path=SETTINGS_PATH,
+        output_dir=tmp_path,
+        show_chart=lambda ticker, days, conflicts=None, rejected_bars=None, quote_bars=None: shown_calls.append(quote_bars),
+    )
+
+    assert shown_calls == [[quote_bar]]
+
+    csv_path = tmp_path / "SPY_2026-01-02_data.csv"
+    csv_text = csv_path.read_text(encoding="utf-8")
+    assert "471.4,471.6,471.45,471.75,471.35,471.55" in csv_text
 
 
 def test_main_passes_quote_bars_through_to_show_chart_and_csv(tmp_path):
@@ -599,6 +651,10 @@ def test_main_passes_quote_bars_through_to_show_chart_and_csv(tmp_path):
         trade_count=10,
         avg_bid=0.9,
         avg_ask=1.1,
+        midpoint_open=None,
+        midpoint_high=None,
+        midpoint_low=None,
+        midpoint_close=None,
     )
 
     class _FakeIBKRProvider(_FakeProviderTrackingQuantDataFetches):
@@ -664,6 +720,10 @@ def test_main_reaches_massive_quote_bars_via_csv_but_not_the_chart(tmp_path):
         trade_count=42,
         avg_bid=None,
         avg_ask=None,
+        midpoint_open=None,
+        midpoint_high=None,
+        midpoint_low=None,
+        midpoint_close=None,
     )
 
     class _FakeMassiveProvider(_FakeProviderTrackingQuantDataFetches):

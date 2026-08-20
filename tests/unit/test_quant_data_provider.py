@@ -5,7 +5,7 @@ from datetime import date, datetime, timezone
 import pytest
 from quant_data import OHLCV, DataQuality, PendingResolutionBar, ProviderRole, RejectedWhistleblowerBar
 
-from defs.protocols import BarConflict, DayBar, ProviderBar
+from defs.protocols import BarConflict, DayBar, ProviderBar, QuoteBar
 from shared.diagnostics import Logger
 from shared.errors import AppError
 from shared.providers import quant_data as quant_data_module
@@ -27,9 +27,11 @@ class FakeMarketData:
         self.requested: tuple[str, date, date] | None = None
         self.pending_requested: tuple[str, date, date] | None = None
         self.rejected_requested: tuple[str, date, date] | None = None
+        self.fetch_bars_call_count = 0
 
     def fetch_bars(self, ticker: str, start_date: date, end_date: date) -> list[OHLCV]:
         self.requested = (ticker, start_date, end_date)
+        self.fetch_bars_call_count += 1
         if self._error is not None:
             raise self._error
         return self._bars
@@ -196,6 +198,89 @@ def test_fetch_bars_raises_on_client_error():
 
     with pytest.raises(AppError):
         provider.fetch_bars("SPY", date(2026, 1, 2))
+
+
+def test_fetch_quote_bars_converts_trade_and_quote_group_fields():
+    fake_client = FakeMarketData(
+        bars=[
+            OHLCV(
+                ticker="SPY",
+                timestamp=datetime(2026, 1, 2, 14, 30, tzinfo=timezone.utc),
+                open=471.5,
+                high=472.4,
+                low=471.3,
+                close=472.1,
+                volume=250000,
+                data_quality=DataQuality.ACCEPTED,
+                wap=471.9,
+                trade_count=42,
+                avg_bid=471.4,
+                avg_ask=471.6,
+                midpoint_open=471.45,
+                midpoint_high=471.75,
+                midpoint_low=471.35,
+                midpoint_close=471.55,
+            )
+        ]
+    )
+    provider = QuantDataIntraDay(client=fake_client)
+    provider.fetch_bars("spy", date(2026, 1, 2))
+
+    quote_bars = provider.fetch_quote_bars("spy", date(2026, 1, 2))
+
+    assert len(quote_bars) == 1
+    assert isinstance(quote_bars[0], QuoteBar)
+    assert quote_bars[0].wap == 471.9
+    assert quote_bars[0].trade_count == 42
+    assert quote_bars[0].avg_bid == 471.4
+    assert quote_bars[0].avg_ask == 471.6
+    assert quote_bars[0].midpoint_open == 471.45
+    assert quote_bars[0].midpoint_high == 471.75
+    assert quote_bars[0].midpoint_low == 471.35
+    assert quote_bars[0].midpoint_close == 471.55
+
+
+def test_fetch_quote_bars_passes_through_null_fields_untouched():
+    # quant-data#61: wap/trade_count are winner-gated on OHLC reconciliation -- null on most bars
+    # today, since ibkr wins the large majority of OHLC votes and doesn't supply them at all. This
+    # is the expected common case, not an error condition.
+    fake_client = FakeMarketData(bars=[_ohlcv(14, 30, close=471.5)])
+    provider = QuantDataIntraDay(client=fake_client)
+    provider.fetch_bars("spy", date(2026, 1, 2))
+
+    quote_bars = provider.fetch_quote_bars("spy", date(2026, 1, 2))
+
+    assert quote_bars[0].wap is None
+    assert quote_bars[0].trade_count is None
+    assert quote_bars[0].avg_bid is None
+    assert quote_bars[0].avg_ask is None
+    assert quote_bars[0].midpoint_open is None
+
+
+def test_fetch_quote_bars_reuses_fetch_bars_response_without_a_second_client_call():
+    fake_client = FakeMarketData(bars=[_ohlcv(14, 30, close=471.5)])
+    provider = QuantDataIntraDay(client=fake_client)
+    provider.fetch_bars("spy", date(2026, 1, 2))
+
+    provider.fetch_quote_bars("spy", date(2026, 1, 2))
+
+    assert fake_client.fetch_bars_call_count == 1
+
+
+def test_fetch_quote_bars_raises_when_fetch_bars_was_not_called_first():
+    provider = QuantDataIntraDay(client=FakeMarketData(bars=[_ohlcv(14, 30, close=471.5)]))
+
+    with pytest.raises(AppError, match="fetch_bars must be called"):
+        provider.fetch_quote_bars("spy", date(2026, 1, 2))
+
+
+def test_fetch_quote_bars_is_scoped_to_its_own_ticker_and_date():
+    fake_client = FakeMarketData(bars=[_ohlcv(14, 30, close=471.5)])
+    provider = QuantDataIntraDay(client=fake_client)
+    provider.fetch_bars("spy", date(2026, 1, 2))
+
+    with pytest.raises(AppError, match="fetch_bars must be called"):
+        provider.fetch_quote_bars("spy", date(2026, 1, 5))
 
 
 def test_constructor_requires_client_or_connection_details():

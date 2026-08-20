@@ -155,7 +155,20 @@ CLI signature and file format schemas for `quant-scratch`.
   instead of re-requesting them, which matters given the free tier's hard 5-calls/minute ceiling.
   `avg_bid`/`avg_ask` are always blank for `massive` — its free Basic tier has no bid/ask/NBBO
   product at any price point without a paid-tier upgrade (confirmed live: `/v3/quotes` 403s "not
-  entitled"). Silent no-op (empty CSV columns, no chart change) for `quant-data`/`yahoo`/`databento`.
+  entitled"). Silent no-op (empty CSV columns, no chart change) for `yahoo`/`databento`.
+- **`--provider quant-data` only**: always (no separate flag) also fetches the same 8-field
+  enrichment quant-data's `OHLCV` now carries (`shared.providers.quant_data.QuantDataIntraDay.fetch_quote_bars`,
+  [quant-data#61](https://github.com/croicu/quant-data/issues/61)) — `wap`/`trade_count` (winner-gated
+  on whichever provider won that bar's OHLC reconciliation; **null on most bars today**, since
+  `ibkr` wins the large majority of OHLC votes and doesn't supply them at all — confirmed live: 0/960
+  filled for a real SPY session) and `avg_bid`/`avg_ask`/`midpoint_open/high/low/close` (IBKR-sourced,
+  no arbitration needed since it's the sole quote source today — confirmed live: 960/960 filled for
+  the same session). Written into the CSV export and drawn as a third bid/ask panel on the popup,
+  same as `ibkr` — unlike `massive`, `quant-data` *can* populate `avg_bid`/`avg_ask`, so the panel
+  isn't pointless here. Midpoint stays CSV-only regardless of provider — no chart panel for it. No
+  extra query: `fetch_quote_bars` reads the trade/quote-group fields out of `fetch_bars`'s own
+  already-fetched `OHLCV` objects (Postgres has no rate-limit concern the way IBKR/Massive do, but
+  a redundant read is still wasteful). Silent no-op for `yahoo`/`databento`.
 
 ### `open-quant-data`
 
@@ -383,10 +396,11 @@ disambiguates which day a row belongs to; no separate `date` column is added):
 | `volume` | int | |
 | `session` | string | `"pre-market"`, `"regular"`, or `"after-market"` |
 | `incomplete` | bool | `True` if quant-data's provider couldn't supply full data for this bar (e.g. no pre/after-market volume), or if a per-provider quality check flagged the value implausible (`DataQuality.REJECTED`, collapsed into the same `True` here — see the rejected-whistleblower-bar note above for where that distinction is actually surfaced). Always `False` for `--provider ibkr`/`databento` — neither `IBKRIntraDay` nor `DatabentoIntraDay` has an equivalent flag, and a zero-volume bar from either is presumed genuinely no trades that minute, not missing data. |
-| `wap` | float or blank | **`--provider ibkr`/`massive` only.** Volume-weighted average trade price for the bar (IBKR `TRADES` bar's `.average`, or Massive aggregates' `vw`). Blank for `quant-data`/`yahoo`/`databento`, and for any minute the source didn't return a value for. |
-| `trade_count` | int or blank | **`--provider ibkr`/`massive` only.** Number of trades in the bar (IBKR `TRADES` bar's `.barCount`, or Massive aggregates' `n`). Blank under the same conditions as `wap`. |
-| `avg_bid` | float or blank | **`--provider ibkr` only.** Time-averaged bid price for the bar (IBKR `BID_ASK` bar's `.open`). Left blank via left join on `timestamp` when the separate `BID_ASK` call didn't return a bar for this exact minute (confirmed to happen live — `BID_ASK` and `TRADES` can return different bar counts for the same window). Always blank for `massive` — its free Basic tier has no bid/ask/NBBO product at all (confirmed live: `/v3/quotes` 403s "not entitled"), not just a per-minute gap. |
-| `avg_ask` | float or blank | **`--provider ibkr` only.** Time-averaged ask price for the bar (IBKR `BID_ASK` bar's `.close`). Same blank conditions as `avg_bid`, including always-blank for `massive`. |
+| `wap` | float or blank | **`--provider ibkr`/`massive`/`quant-data` only.** Volume-weighted average trade price for the bar (IBKR `TRADES` bar's `.average`, Massive aggregates' `vw`, or quant-data's winner-gated `OHLCV.wap`). Blank for `yahoo`/`databento`, and for any minute the source didn't return a value for — for `quant-data` specifically, that's most bars today, since `wap` is only populated when the provider that won that bar's OHLC reconciliation supplied it (`ibkr` wins most bars and doesn't supply `wap` at all; confirmed live: 0/960 filled for a real SPY session). |
+| `trade_count` | int or blank | **`--provider ibkr`/`massive`/`quant-data` only.** Number of trades in the bar (IBKR `TRADES` bar's `.barCount`, Massive aggregates' `n`, or quant-data's winner-gated `OHLCV.trade_count`). Blank under the same conditions as `wap`, including the same quant-data winner-gating caveat. |
+| `avg_bid` | float or blank | **`--provider ibkr`/`quant-data` only.** Time-averaged bid price for the bar (IBKR `BID_ASK` bar's `.open`, or quant-data's `OHLCV.avg_bid`). For `ibkr`, left blank via left join on `timestamp` when the separate `BID_ASK` call didn't return a bar for this exact minute (confirmed to happen live — `BID_ASK` and `TRADES` can return different bar counts for the same window). For `quant-data`, populated on essentially every bar today (confirmed live: 960/960) — IBKR is the sole quote source in the warehouse, no arbitration/gating unlike the trade-group fields above. Always blank for `massive` — its free Basic tier has no bid/ask/NBBO product at all (confirmed live: `/v3/quotes` 403s "not entitled"), not just a per-minute gap. |
+| `avg_ask` | float or blank | **`--provider ibkr`/`quant-data` only.** Time-averaged ask price for the bar (IBKR `BID_ASK` bar's `.close`, or quant-data's `OHLCV.avg_ask`). Same blank/fill conditions as `avg_bid`. |
+| `midpoint_open` / `midpoint_high` / `midpoint_low` / `midpoint_close` | float or blank | **`--provider quant-data` only.** Midpoint-of-bid/ask OHLC for the bar, sourced from IBKR's `MIDPOINT` feed via quant-data's own archive (`OHLCV.midpoint_open/high/low/close`) — quant-scratch's own direct `IBKRIntraDay` doesn't fetch `MIDPOINT` itself, so these are always blank for `--provider ibkr`. Same fill behavior as `avg_bid`/`avg_ask` (essentially every bar today, confirmed live). Always blank for `massive`/`yahoo`/`databento`. CSV-only — no chart panel, even where the data is populated. |
 
 ### Day-chart popup window
 
@@ -394,9 +408,10 @@ No longer written to disk — `day-chart` displays it as an interactive matplotl
 (`day_chart.chart.show_chart`, `TkAgg` backend, non-blocking `plt.show()` gated by polling the GUI
 event loop until the window's own close event fires). One day: a figure with two vertically stacked subplots sharing an
 x-axis (rendered in US/Eastern time): price (line) on top (3/4 of the figure height), volume (bar)
-below (1/4). **For `--provider ibkr`**, a third subplot appears below volume (same height ratio as
-volume) plotting `avg_bid`/`avg_ask` as two lines — present only when quote-bar data was actually
-fetched for that day; every other provider keeps the two-subplot layout. A `--start-date`/`--end-date` range: the same subplot layout repeated once per
+below (1/4). **For `--provider ibkr`/`quant-data`**, a third subplot appears below volume (same
+height ratio as volume) plotting `avg_bid`/`avg_ask` as two lines — present only when quote-bar
+data was actually fetched for that day; `massive`/`yahoo`/`databento` keep the two-subplot layout
+(`massive` never populates `avg_bid`/`avg_ask` at all, so a panel there would just be empty). A `--start-date`/`--end-date` range: the same subplot layout repeated once per
 charted day, stacked horizontally left-to-right in chronological order with a small gap between
 days (each day keeping its own independent midnight-to-midnight x-axis — days are *not* a shared
 timeline), a shared ticker title above the whole figure, and each day's own date as that panel's

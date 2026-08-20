@@ -54,21 +54,28 @@ rather than something provider-specific.
   identical to a conflict's whistleblower/candidate entry, so introducing a distinct
   `RejectedWhistleblowerBar`-mirroring type here would just duplicate `ProviderBar` for no
   behavioral difference. See `QuantDataIntraDay.fetch_rejected_bars` below.
-  `QuoteBar` (`timestamp: datetime` UTC-aware, `wap`/`trade_count`/`avg_bid`/`avg_ask`, all
-  `| None`) is per-provider enrichment data beyond plain OHLCV
-  ([croicu/quant-scratch#26](https://github.com/croicu/quant-scratch/issues/26)), originally named
+  `QuoteBar` (`timestamp: datetime` UTC-aware, `wap`/`trade_count`/`avg_bid`/`avg_ask`/
+  `midpoint_open/high/low/close`, all `| None`) is per-provider enrichment data beyond plain OHLCV
+  ([croicu/quant-scratch#26](https://github.com/croicu/quant-scratch/issues/26)/
+  [croicu/quant-scratch#28](https://github.com/croicu/quant-scratch/issues/28)), originally named
   `IBKRQuoteBar` before Massive became a second real consumer of the identical shape (renamed once
-  a second concrete use case existed, not speculatively). Deliberately kept off `DayBar` (which
-  stays pure OHLCV, shared unchanged by every `IntraDayProvider`) — same reasoning as `BarConflict`
-  above, a provider-specific extra rather than a shared-interface field. Two producers today: IBKR
-  (`IBKRIntraDay.fetch_quote_bars` — WAP/trade count from the same `TRADES` bar already fetched for
-  OHLCV, previously discarded; avg_bid/avg_ask from a separate `BID_ASK` call, all four fields
-  potentially populated) and Massive (`MassiveIntraDay.fetch_quote_bars` — WAP/trade count from the
-  same aggregates call already fetched for OHLCV; avg_bid/avg_ask always `None`, since Massive's
-  free tier has no bid/ask product at all). All fields Optional both because a provider may simply
-  never have a field (Massive's avg_bid/avg_ask) and because IBKR's `TRADES`/`BID_ASK` calls can
-  (confirmed live) return different bar counts for the same window — see each provider's own
-  `fetch_quote_bars` below for its merge policy.
+  a second concrete use case existed, not speculatively); the 4 `midpoint_*` fields were added once
+  quant-data became a third producer with its own new field group (quant-data#61). Deliberately
+  kept off `DayBar` (which stays pure OHLCV, shared unchanged by every `IntraDayProvider`) — same
+  reasoning as `BarConflict` above, a provider-specific extra rather than a shared-interface field.
+  Three producers today: IBKR (`IBKRIntraDay.fetch_quote_bars` — WAP/trade count from the same
+  `TRADES` bar already fetched for OHLCV, previously discarded; avg_bid/avg_ask from a separate
+  `BID_ASK` call; `midpoint_*` always `None` — this provider doesn't fetch IBKR's `MIDPOINT`
+  method directly), Massive (`MassiveIntraDay.fetch_quote_bars` — WAP/trade count from the same
+  aggregates call already fetched for OHLCV; avg_bid/avg_ask/midpoint_* always `None`, since
+  Massive's free tier has no bid/ask or midpoint product at all), and quant-data
+  (`QuantDataIntraDay.fetch_quote_bars` — all 8 fields straight from `OHLCV`, which now carries
+  the identical shape after quant-data#61: wap/trade_count winner-gated on OHLC reconciliation,
+  avg_bid/avg_ask/midpoint_* IBKR-sourced with no arbitration needed yet). All fields Optional both
+  because a provider may simply never have a field (Massive's avg_bid/avg_ask/midpoint_*, IBKR's
+  own midpoint_*) and because IBKR's `TRADES`/`BID_ASK` calls can (confirmed live) return different
+  bar counts for the same window — see each provider's own `fetch_quote_bars` below for its merge
+  policy.
 - `contracts.py` — behavioral interfaces: `YahooFinanceProvider(Protocol)` — `fetch_quote(ticker) -> StockQuote`;
   `IntraDayProvider(Protocol)` — `fetch_bars(ticker, target_date) -> list[DayBar]`. `BarConflict`
   fetching (`QuantDataIntraDay.fetch_conflicts`) and rejected-bar fetching
@@ -260,6 +267,28 @@ and has no CLI/console script of its own.
     it is still undesigned (`tasks/yahoo_data_sanitization.md` on that side) — so this is
     unit-tested against a mocked client only (wiring/conversion correctness), not live-verified
     against real rejected data end-to-end the way `fetch_conflicts` was for issue #15.
+
+    Also `fetch_quote_bars(ticker, target_date) -> list[QuoteBar]` — a fourth public method, same
+    not-part-of-`IntraDayProvider` reasoning as `fetch_conflicts`/`fetch_rejected_bars`
+    ([quant-data#61](https://github.com/croicu/quant-data/issues/61)/
+    [quant-scratch#28](https://github.com/croicu/quant-scratch/issues/28)). `OHLCV` gained 8
+    nullable fields once #61 shipped: `wap`/`trade_count` (winner-gated — copied from whichever
+    provider's staging row won that bar's OHLC reconciliation; null on most bars today, since
+    `ibkr` wins the large majority of OHLC votes and doesn't supply them at all) and
+    `avg_bid`/`avg_ask`/`midpoint_open/high/low/close` (IBKR-sourced, no arbitration needed since
+    it's the sole quote source today). `_ohlcv_to_quotebar` is a straight field-for-field
+    passthrough — `OHLCV`'s own fields already carry the same None-means-not-available semantics
+    `QuoteBar` uses. No second `MarketData.fetch_bars` call: `fetch_bars` stashes its own
+    `ohlcv_bars` list in `self._ohlcv_cache[(ticker, target_date)]` right before returning, and
+    `fetch_quote_bars` reads it back — same "reuse the response you already have" reasoning as
+    `MassiveIntraDay`'s cache, even though Postgres reads have no rate-limit concern the way
+    Massive's free tier does; it's still a wasted round trip to avoid. Raises `AppError` if called
+    for a `(ticker, target_date)` `fetch_bars` hasn't succeeded for yet, same "call `fetch_bars`
+    first" contract as `MassiveIntraDay.fetch_quote_bars`. **Live-verified against the real
+    warehouse**, not just mocks: 960/960 bars had `avg_bid`/`avg_ask`/midpoint OHLC populated for a
+    real SPY session, 0/960 had `wap`/`trade_count` — exactly matching #61's winner-gating design
+    (confirmed via `day-chart --provider quant-data`'s CSV export and its new third bid/ask panel,
+    see `day_chart` notes further down).
   - `ibkr.py` -- `IBKRIntraDay`, another `defs.contracts.IntraDayProvider` implementation, wrapping
     [`ib_async`](https://github.com/ib-api-reloaded/ib_async) (the actively-maintained community
     fork of the archived `ib_insync`) against a local IB Gateway/TWS instance. Built for
@@ -537,13 +566,16 @@ implementation plus `Settings`/`Logger`/`AppError`. No dependency on `quant_data
 confined to `shared/providers/quant_data.py`.
 
 - `output.py` — `bars_to_csv(bars, quote_bars: list[QuoteBar] | None = None) -> str`; columns
-  include `incomplete`, plus `wap`/`trade_count`/`avg_bid`/`avg_ask` (always in the header,
-  regardless of provider). `quote_bars` is left-joined onto `bars` by matching `timestamp` — a
-  `DayBar` row with no matching `QuoteBar` (or `quote_bars=None`, every non-`ibkr`/`massive`
-  provider) gets blank strings for the four new columns, same policy `IBKRIntraDay.fetch_quote_bars`
-  uses internally for its own `TRADES`/`BID_ASK` merge (see that provider's notes above). `massive`
-  populates `wap`/`trade_count` the same way but `avg_bid`/`avg_ask` always come through blank — its
-  `QuoteBar`s never set them. No
+  include `incomplete`, plus `wap`/`trade_count`/`avg_bid`/`avg_ask`/`midpoint_open/high/low/close`
+  (always in the header, regardless of provider). `quote_bars` is left-joined onto `bars` by
+  matching `timestamp` — a `DayBar` row with no matching `QuoteBar` (or `quote_bars=None`, every
+  non-`ibkr`/`massive`/`quant-data` provider) gets blank strings for all eight new columns, same
+  policy `IBKRIntraDay.fetch_quote_bars` uses internally for its own `TRADES`/`BID_ASK` merge (see
+  that provider's notes above). `massive` populates `wap`/`trade_count` the same way but
+  `avg_bid`/`avg_ask`/`midpoint_*` always come through blank — its `QuoteBar`s never set them.
+  `quant-data` populates all eight (though `wap`/`trade_count` are blank on most bars today, per
+  quant-data#61's winner-gating). `ibkr` never populates `midpoint_*` (this provider doesn't fetch
+  IBKR's `MIDPOINT` method itself). No
   `BarConflict` export — the pending-resolution display is chart-only by design. The `timestamp`
   column is written as `bar.timestamp.astimezone(EASTERN).strftime("%Y-%m-%d %H:%M:%S")`, not
   `DayBar.timestamp`'s own UTC `isoformat()` — Excel doesn't parse ISO 8601's `T` separator + UTC
@@ -769,19 +801,22 @@ confined to `shared/providers/quant_data.py`.
   ([issue #15](https://github.com/croicu/quant-scratch/issues/15),
   [issue #16](https://github.com/croicu/quant-scratch/issues/16)).
 
-  When `--provider ibkr` *or* `massive` is selected, `main()` also calls
+  When `--provider ibkr`, `massive`, *or* `quant-data` is selected, `main()` also calls
   `active_provider.fetch_quote_bars(ticker, session_date)` once per successfully-charted day
   (accumulated into a flat `quote_bars` list, same flat-list shape `all_bars` already uses) and
-  threads the result into `bars_to_csv` for both providers. A per-day `fetch_quote_bars` failure is
-  caught and logged (category `date_range`, same as the ordinary per-day skip) without dropping
-  that day's OHLCV — unlike a `fetch_bars` failure, losing quote-bar enrichment doesn't invalidate
-  the rest of the day's data ([issue #26](https://github.com/croicu/quant-scratch/issues/26)).
-  `show_chart`'s 5th argument is gated further, separately from the CSV: a distinct
-  `chart_quote_bars` value is `None` unless the provider is specifically `ibkr` *and* `quote_bars`
-  is non-empty — Massive's bid/ask panel would always be empty (it never has `avg_bid`/`avg_ask`),
-  and the user explicitly asked for the Massive/yfinance chart layouts to stay untouched, so
-  `chart.py` only ever sees non-`None` `quote_bars` for `ibkr`. See `chart.py`'s `quote_bars` note
-  above for why `None` vs. `[]` matters to it specifically. `ShowChartFn`
+  threads the result into `bars_to_csv` for all three providers. A per-day `fetch_quote_bars`
+  failure is caught and logged (category `date_range`, same as the ordinary per-day skip) without
+  dropping that day's OHLCV — unlike a `fetch_bars` failure, losing quote-bar enrichment doesn't
+  invalidate the rest of the day's data
+  ([issue #26](https://github.com/croicu/quant-scratch/issues/26)/
+  [issue #28](https://github.com/croicu/quant-scratch/issues/28)). `show_chart`'s 5th argument is
+  gated further, separately from the CSV: a distinct `chart_quote_bars` value is `None` unless the
+  provider is `ibkr` *or* `quant-data` *and* `quote_bars` is non-empty — both can populate
+  `avg_bid`/`avg_ask`. Massive's bid/ask panel would always be empty (it never has
+  `avg_bid`/`avg_ask` at all), and the user explicitly asked for the Massive/yfinance chart layouts
+  to stay untouched, so `chart.py` never sees non-`None` `quote_bars` for `massive`. Midpoint stays
+  CSV-only for every provider — no chart-panel change tied to it. See `chart.py`'s `quote_bars`
+  note above for why `None` vs. `[]` matters to it specifically. `ShowChartFn`
   (`Callable[[str, list[DayChartData], list[BarConflict], list[ProviderBar],
   list[QuoteBar]], None]`) gained this 5th parameter accordingly.
 
@@ -961,24 +996,26 @@ than failing the whole command — → `list[DayChartData]` (`(date, list[DayBar
 When `--provider quant-data`, also → `QuantDataIntraDay.fetch_conflicts` and
 `QuantDataIntraDay.fetch_rejected_bars` (each once for the whole resolved range; silent no-op →
 `[]` for `ibkr`/`yahoo`/`databento`/`massive`) → `list[BarConflict]` and `list[ProviderBar]` respectively.
-When `--provider ibkr` or `massive`, also → `IBKRIntraDay.fetch_quote_bars`/
-`MassiveIntraDay.fetch_quote_bars` once per successfully-charted day (a per-day failure is logged
-as a warning and only that day's enrichment is dropped, not its OHLCV — unlike a `fetch_bars`
-failure) → accumulated `list[QuoteBar]` ([issue #26](https://github.com/croicu/quant-scratch/issues/26)).
+When `--provider ibkr`, `massive`, or `quant-data`, also → `IBKRIntraDay.fetch_quote_bars`/
+`MassiveIntraDay.fetch_quote_bars`/`QuantDataIntraDay.fetch_quote_bars` once per
+successfully-charted day (a per-day failure is logged as a warning and only that day's enrichment
+is dropped, not its OHLCV — unlike a `fetch_bars` failure) → accumulated `list[QuoteBar]`
+([issue #26](https://github.com/croicu/quant-scratch/issues/26)/
+[issue #28](https://github.com/croicu/quant-scratch/issues/28)).
 This list always reaches `output.bars_to_csv` (or `None` if every day's call failed/returned
-nothing) for both providers, but only reaches `show_chart`'s 5th argument for `ibkr` — a separate
-`chart_quote_bars` value stays `None` for `massive` even when real data was fetched, since its
-`QuoteBar`s never have `avg_bid`/`avg_ask` and the chart layout is deliberately left untouched for
-that provider. All five (`days`, `conflicts`, `rejected_bars`, `chart_quote_bars` alongside
-`ticker`) → injected `show_chart` (real: `chart.show_chart`, a blocking popup window rendering
-red/blue candlesticks for any conflicts, orange candlesticks for any rejected bars, and a third
-bid/ask panel only when its 5th argument is not `None`, i.e. only ever for `ibkr`; test: a non-GUI
-stand-in) and, after flattening every charted day's bars into one list, `output.bars_to_csv` (→
-`<TICKER>_<DATE>_data.csv` for a single day, `<TICKER>_<START>_<END>_data.csv` for a range; written
-to `output_dir`, CWD by default — `BarConflict`/rejected-bar data still doesn't reach the CSV,
-chart-only by design; `quote_bars`
-does, left-joined onto `bars` by timestamp into the `wap`/`trade_count`/`avg_bid`/`avg_ask`
-columns).
+nothing) for all three providers, but only reaches `show_chart`'s 5th argument for `ibkr`/
+`quant-data` — a separate `chart_quote_bars` value stays `None` for `massive` even when real data
+was fetched, since its `QuoteBar`s never have `avg_bid`/`avg_ask` and the chart layout is
+deliberately left untouched for that provider. All five (`days`, `conflicts`, `rejected_bars`,
+`chart_quote_bars` alongside `ticker`) → injected `show_chart` (real: `chart.show_chart`, a
+blocking popup window rendering red/blue candlesticks for any conflicts, orange candlesticks for
+any rejected bars, and a third bid/ask panel only when its 5th argument is not `None`, i.e. only
+for `ibkr`/`quant-data`; test: a non-GUI stand-in) and, after flattening every charted day's bars
+into one list, `output.bars_to_csv` (→ `<TICKER>_<DATE>_data.csv` for a single day,
+`<TICKER>_<START>_<END>_data.csv` for a range; written to `output_dir`, CWD by default —
+`BarConflict`/rejected-bar data still doesn't reach the CSV, chart-only by design; `quote_bars`
+does, left-joined onto `bars` by timestamp into the `wap`/`trade_count`/`avg_bid`/`avg_ask`/
+`midpoint_open/high/low/close` columns).
 
 ## Contracts
 
