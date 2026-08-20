@@ -5,7 +5,7 @@ from datetime import date, datetime, timezone
 
 from quant_data import OHLCV, DataQuality, MarketData, PendingResolutionBar, ProviderRole, create_postgres_provider
 
-from defs.protocols import BarConflict, DayBar, ProviderBar
+from defs.protocols import BarConflict, DayBar, ProviderBar, QuoteBar
 
 from ..diagnostics import Logger
 from ..errors import AppError
@@ -44,6 +44,25 @@ def _ohlcv_to_daybar(ohlcv: OHLCV) -> DayBar:
     )
 
 
+def _ohlcv_to_quotebar(ohlcv: OHLCV) -> QuoteBar:
+    # quant-data#61: OHLCV gained 8 new nullable fields (trade group: wap/trade_count, winner-gated
+    # on whichever provider won that bar's OHLC reconciliation; quote group: avg_bid/avg_ask/
+    # midpoint_open/high/low/close, IBKR-sourced, no arbitration yet since it's the sole quote
+    # source today). Straight passthrough -- OHLCV's own fields are already Optional with the same
+    # None-means-not-available semantics QuoteBar uses.
+    return QuoteBar(
+        timestamp=_ensure_utc(ohlcv.timestamp),
+        wap=ohlcv.wap,
+        trade_count=ohlcv.trade_count,
+        avg_bid=ohlcv.avg_bid,
+        avg_ask=ohlcv.avg_ask,
+        midpoint_open=ohlcv.midpoint_open,
+        midpoint_high=ohlcv.midpoint_high,
+        midpoint_low=ohlcv.midpoint_low,
+        midpoint_close=ohlcv.midpoint_close,
+    )
+
+
 class QuantDataIntraDay:
     def __init__(
         self,
@@ -56,6 +75,14 @@ class QuantDataIntraDay:
         ssh_key_path: str | None = None,
         client: MarketData | None = None,
     ) -> None:
+        # fetch_quote_bars reads the trade/quote-group fields out of fetch_bars's own OHLCV
+        # objects instead of issuing a second MarketData.fetch_bars call -- everything it needs is
+        # already in that response, so a second query would be pure duplication (same reasoning as
+        # MassiveIntraDay's cache, even though Postgres reads have no rate-limit concern the way
+        # Massive's free tier does). Keyed by (ticker, target_date); populated at the end of a
+        # successful fetch_bars call.
+        self._ohlcv_cache: dict[tuple[str, date], list[OHLCV]] = {}
+
         if client is not None:
             self._client = client
             return
@@ -103,11 +130,34 @@ class QuantDataIntraDay:
         for ohlcv in ohlcv_bars:
             bars.append(_ohlcv_to_daybar(ohlcv))
 
+        self._ohlcv_cache[(normalized_ticker, target_date)] = ohlcv_bars
+
         Logger.info(
             f"day-chart: fetched {len(bars)} intraday bars for {normalized_ticker} on {target_date.isoformat()} from quant-data.",
             category=CATEGORY_INTRADAY_FETCH,
         )
         return bars
+
+    def fetch_quote_bars(self, ticker: str, target_date: date) -> list[QuoteBar]:
+        # See _ohlcv_cache's own comment (__init__) for why this reads fetch_bars's own response
+        # rather than issuing a second MarketData.fetch_bars call.
+        normalized_ticker = ticker.upper()
+        cached_ohlcv_bars = self._ohlcv_cache.get((normalized_ticker, target_date))
+        if cached_ohlcv_bars is None:
+            raise AppError(
+                f"No cached quant-data response for '{normalized_ticker}' on {target_date.isoformat()} -- "
+                "fetch_bars must be called for the same ticker/date before fetch_quote_bars."
+            )
+
+        quote_bars: list[QuoteBar] = []
+        for ohlcv in cached_ohlcv_bars:
+            quote_bars.append(_ohlcv_to_quotebar(ohlcv))
+
+        Logger.info(
+            f"day-chart: fetched {len(quote_bars)} quote bars for {normalized_ticker} on {target_date.isoformat()} from quant-data.",
+            category=CATEGORY_INTRADAY_FETCH,
+        )
+        return quote_bars
 
     def fetch_conflicts(self, ticker: str, start_date: date, end_date: date) -> list[BarConflict]:
         normalized_ticker = ticker.upper()

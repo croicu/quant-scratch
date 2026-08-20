@@ -145,6 +145,13 @@ class IBKRIntraDay:
                     trade_count=None if raw_bar.barCount < 0 else int(raw_bar.barCount),
                     avg_bid=None if matching_bid_ask is None else matching_bid_ask.open,
                     avg_ask=None if matching_bid_ask is None else matching_bid_ask.close,
+                    # This provider only fetches TRADES/BID_ASK, not MIDPOINT -- these come through
+                    # populated when the data is quant-data-sourced instead (its own IBKR-derived
+                    # archive already carries MIDPOINT), not from this direct-to-Gateway path.
+                    midpoint_open=None,
+                    midpoint_high=None,
+                    midpoint_low=None,
+                    midpoint_close=None,
                 )
             )
 

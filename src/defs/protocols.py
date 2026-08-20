@@ -40,18 +40,24 @@ class ProviderBar:
 
 @dataclass
 class QuoteBar:
-    # Per-provider enrichment beyond plain OHLCV -- WAP/trade count (trade-derived) and
-    # time-averaged bid/ask (quote-derived, IBKR only today). Kept off DayBar so DayBar stays pure
+    # Per-provider enrichment beyond plain OHLCV -- WAP/trade count (trade-derived), time-averaged
+    # bid/ask, and midpoint OHLC (both quote-derived, IBKR only today, whether fetched directly or
+    # sourced via quant-data's own IBKR-derived archive). Kept off DayBar so DayBar stays pure
     # OHLCV, shared unchanged across every IntraDayProvider. All Optional: a field is None either
     # because a provider never has it at all (e.g. Massive's free tier has no bid/ask, so
     # avg_bid/avg_ask are always None there), or because a given minute is missing from whichever
-    # source supplies it (see shared.providers.ibkr.IBKRIntraDay.fetch_quote_bars and
-    # shared.providers.massive.MassiveIntraDay.fetch_quote_bars).
+    # source supplies it (see shared.providers.ibkr.IBKRIntraDay.fetch_quote_bars,
+    # shared.providers.massive.MassiveIntraDay.fetch_quote_bars, and
+    # shared.providers.quant_data.QuantDataIntraDay.fetch_quote_bars).
     timestamp: datetime  # timezone-aware, UTC
     wap: float | None
     trade_count: int | None
     avg_bid: float | None
     avg_ask: float | None
+    midpoint_open: float | None
+    midpoint_high: float | None
+    midpoint_low: float | None
+    midpoint_close: float | None
 
 
 @dataclass

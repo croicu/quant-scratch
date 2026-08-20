@@ -344,19 +344,19 @@ def main(
                 conflicts = active_provider.fetch_conflicts(normalized_ticker, session_date, session_date)
                 rejected_bars = active_provider.fetch_rejected_bars(normalized_ticker, session_date, session_date)
 
-        # WAP/trade-count (+ bid-ask for ibkr) enrichment is an ibkr/massive-only extra, same
-        # "always on for this provider, no separate flag" precedent as quant-data's
-        # conflicts/rejected_bars above. A per-day fetch failure here only drops that day's
-        # enrichment (blank CSV columns) -- it doesn't invalidate the day's OHLCV data the way a
-        # fetch_bars failure does.
+        # WAP/trade-count (+ bid-ask/midpoint where available) enrichment is an
+        # ibkr/massive/quant-data-only extra, same "always on for this provider, no separate flag"
+        # precedent as quant-data's conflicts/rejected_bars above. A per-day fetch failure here
+        # only drops that day's enrichment (blank CSV columns) -- it doesn't invalidate the day's
+        # OHLCV data the way a fetch_bars failure does.
         quote_bars: list[QuoteBar] = []
-        if arguments.provider in (PROVIDER_IBKR, PROVIDER_MASSIVE):
+        if arguments.provider in (PROVIDER_IBKR, PROVIDER_MASSIVE, PROVIDER_QUANT_DATA):
             for session_date_with_bars, _ in days:
                 try:
                     quote_bars.extend(active_provider.fetch_quote_bars(normalized_ticker, session_date_with_bars))
                 except AppError as error:
                     Logger.warning(
-                        f"day-chart: no WAP/trade-count/bid-ask data for {session_date_with_bars.isoformat()}: {error}",
+                        f"day-chart: no WAP/trade-count/bid-ask/midpoint data for {session_date_with_bars.isoformat()}: {error}",
                         category=CATEGORY_DATE_RANGE,
                     )
 
@@ -364,10 +364,12 @@ def main(
         for _, day_bars in days:
             all_bars.extend(day_bars)
 
-        # The bid/ask chart panel stays ibkr-only by design (massive never has avg_bid/avg_ask, so
-        # a third panel there would just be an empty, pointless row) -- quote_bars still reaches
-        # the CSV for both providers below, only the chart call is gated further.
-        chart_quote_bars = quote_bars if (quote_bars and arguments.provider == PROVIDER_IBKR) else None
+        # The bid/ask chart panel is available for ibkr and quant-data (both can populate
+        # avg_bid/avg_ask) but not massive, which never has bid/ask at all -- a third panel there
+        # would just be an empty, pointless row. quote_bars still reaches the CSV for every
+        # provider that fetched it, only the chart call is gated further. Midpoint stays CSV-only
+        # regardless of provider -- no chart panel for it.
+        chart_quote_bars = quote_bars if (quote_bars and arguments.provider in (PROVIDER_IBKR, PROVIDER_QUANT_DATA)) else None
         active_show_chart(normalized_ticker, days, conflicts, rejected_bars, chart_quote_bars)
 
         write_start = perf_counter()

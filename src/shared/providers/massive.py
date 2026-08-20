@@ -132,9 +132,9 @@ class MassiveIntraDay:
     def fetch_quote_bars(self, ticker: str, target_date: date) -> list[QuoteBar]:
         # Reads vw (WAP)/n (trade count) out of fetch_bars's own cached response for the same
         # ticker/date -- see _raw_bars_cache's own comment for why this deliberately doesn't issue
-        # a second HTTP call. avg_bid/avg_ask are always None: Massive's free Basic tier has no
-        # bid/ask/NBBO product at all (confirmed live -- /v3/quotes 403s "not entitled"), unlike
-        # IBKR where a second BID_ASK call supplies them.
+        # a second HTTP call. avg_bid/avg_ask/midpoint_* are always None: Massive's free Basic tier
+        # has no bid/ask/NBBO or midpoint product at all (confirmed live -- /v3/quotes 403s "not
+        # entitled"), unlike IBKR where separate BID_ASK/MIDPOINT calls supply them.
         normalized_ticker = ticker.upper()
         cached_raw_bars = self._raw_bars_cache.get((normalized_ticker, target_date))
         if cached_raw_bars is None:
@@ -152,6 +152,10 @@ class MassiveIntraDay:
                     trade_count=raw_bar.get("n"),
                     avg_bid=None,
                     avg_ask=None,
+                    midpoint_open=None,
+                    midpoint_high=None,
+                    midpoint_low=None,
+                    midpoint_close=None,
                 )
             )
 
